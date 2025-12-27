@@ -17,14 +17,14 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
     && rm -rf awscliv2.zip aws
 
 # Vast.ai CLI 설치
-RUN uv pip install --system vastai
+RUN uv pip install --system --no-cache vastai
 
 # 작업 디렉토리 설정
 WORKDIR /workspace
 
 # 의존성 파일 복사 및 설치
 COPY pyproject.toml .
-RUN uv pip install --system .
+RUN uv pip install --system --no-cache .
 
 # 소스 코드 복사
 COPY src/ src/
