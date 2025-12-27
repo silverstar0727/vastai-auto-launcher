@@ -85,6 +85,15 @@ jobs:
         with:
           ref: ${{ steps.pr-info.outputs.ref || github.ref }}
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -158,7 +167,7 @@ jobs:
           CONFIG_FILE: ${{ needs.build-and-push.outputs.config || github.event.inputs.config_file || 'config.yaml' }}
           EXTRA_ARGS: ${{ needs.build-and-push.outputs.extra_args || github.event.inputs.extra_args || '' }}
         run: |
-          python vastai_launcher.py \
+          python scripts/vastai_launcher.py \
             --docker-image "$DOCKER_IMAGE" \
             --wandb-key "$WANDB_API_KEY" \
             --aws-key "$AWS_ACCESS_KEY_ID" \
