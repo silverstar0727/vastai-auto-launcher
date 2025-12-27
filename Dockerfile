@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+FROM vastai/pytorch:2.9.1-cuda-13.0.2-py312-24.04
 
 # 필수 패키지 설치
 RUN apt-get update && apt-get install -y --no-install-recommends \
