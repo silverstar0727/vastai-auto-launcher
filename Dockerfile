@@ -15,8 +15,8 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
     && ./aws/install \
     && rm -rf awscliv2.zip aws
 
-# Vast.ai CLI 설치
-RUN uv pip install --system --no-cache vastai
+# # Vast.ai CLI 설치
+# RUN uv pip install --system --no-cache vastai
 
 # 작업 디렉토리 설정
 WORKDIR /workspace
