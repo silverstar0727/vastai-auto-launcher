@@ -1,6 +1,6 @@
 # lightning.pytorch==2.0.0
 name: my_experiment
-version: my_version
+version: my_version_1
 
 seed_everything: 42
 trainer:
