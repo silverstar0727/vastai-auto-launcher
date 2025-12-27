@@ -1,10 +1,9 @@
 FROM vastai/pytorch:2.9.1-cuda-13.0.2-py312-24.04
 
 # 필수 패키지 설치
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    curl \
-    unzip \
+RUN rm -rf /var/lib/apt/lists/* \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends git curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # uv 설치
