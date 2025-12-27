@@ -1,0 +1,181 @@
+name: Build and Train on Vast.ai
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      config_file:
+        description: 'Config file path (e.g., config.yaml)'
+        required: false
+        default: 'config.yaml'
+      extra_args:
+        description: 'Extra arguments for training'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    # PR 코멘트에서 /train 명령어가 있을 때만 실행
+    if: |
+      (github.event_name == 'issue_comment' && 
+       github.event.issue.pull_request && 
+       startsWith(github.event.comment.body, '/train')) ||
+      github.event_name == 'workflow_dispatch'
+    
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write  # PR에 코멘트 작성 권한
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: React to comment
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+
+      - name: Get PR branch
+        id: pr-info
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('ref', pr.data.head.ref);
+            core.setOutput('sha', pr.data.head.sha);
+
+      - name: Parse command arguments
+        id: parse-args
+        run: |
+          COMMENT_BODY="${{ github.event.comment.body }}"
+          
+          # config 파싱: /train --config configs/xxx.yaml
+          CONFIG=$(echo "$COMMENT_BODY" | grep -oP '(?<=--config\s)[^\s]+' || echo "")
+          if [ -z "$CONFIG" ]; then
+            CONFIG="config.yaml"
+          fi
+          echo "config=$CONFIG" >> $GITHUB_OUTPUT
+          
+          # extra-args 파싱: /train --extra-args "--epochs 100"
+          EXTRA=$(echo "$COMMENT_BODY" | grep -oP '(?<=--extra-args\s")[^"]+' || echo "")
+          echo "extra_args=$EXTRA" >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr-info.outputs.ref || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  launch-vastai:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get PR branch
+        id: pr-info
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('ref', pr.data.head.ref);
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr-info.outputs.ref || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests vastai
+
+      - name: Launch Vast.ai instance
+        env:
+          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          S3_DATA_PATH: ${{ secrets.S3_DATA_PATH }}
+          DOCKER_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          CONFIG_FILE: ${{ needs.build-and-push.outputs.config || github.event.inputs.config_file || 'config.yaml' }}
+          EXTRA_ARGS: ${{ needs.build-and-push.outputs.extra_args || github.event.inputs.extra_args || '' }}
+        run: |
+          python vastai_launcher.py \
+            --docker-image "$DOCKER_IMAGE" \
+            --wandb-key "$WANDB_API_KEY" \
+            --aws-key "$AWS_ACCESS_KEY_ID" \
+            --aws-secret "$AWS_SECRET_ACCESS_KEY" \
+            --aws-region "${AWS_DEFAULT_REGION:-ap-northeast-2}" \
+            --s3-path "$S3_DATA_PATH" \
+            --config "$CONFIG_FILE" \
+            --extra-args "$EXTRA_ARGS"
+
+      - name: Comment result on PR
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `✅ **Training launched successfully!**\n\n- Config: \`${{ env.CONFIG_FILE }}\`\n- Docker Image: \`${{ env.DOCKER_IMAGE }}\`\n- [View workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
+            });

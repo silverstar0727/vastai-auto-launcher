@@ -1,0 +1,23 @@
+[project]
+name = "lightning-codebase"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "docstring-parser>=0.17.0",
+    "jsonargparse>=4.44.0",
+    "lightning>=2.6.0",
+    "omegaconf>=2.3.0",
+    "opencv-python-headless>=4.12.0.88",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.6.1",
+    "tensorboardx>=2.6.4",
+    "torchvision>=0.23.0",
+    "typeshed-client>=2.8.2",
+    "typing-extensions>=4.15.0",
+    "wandb>=0.23.1",
+    "matplotlib==3.9.4",
+    "seaborn==0.13.2",
+    "torch-geometric==2.6.1"
+]
