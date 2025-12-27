@@ -158,7 +158,7 @@ jobs:
           CONFIG_FILE: ${{ needs.build-and-push.outputs.config || github.event.inputs.config_file || 'config.yaml' }}
           EXTRA_ARGS: ${{ needs.build-and-push.outputs.extra_args || github.event.inputs.extra_args || '' }}
         run: |
-          python vastai_launcher.py \
+          python scripts/vastai_launcher.py \
             --docker-image "$DOCKER_IMAGE" \
             --wandb-key "$WANDB_API_KEY" \
             --aws-key "$AWS_ACCESS_KEY_ID" \
