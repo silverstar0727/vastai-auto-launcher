@@ -200,7 +200,7 @@ main() {
     log_info "Step 3/3: Launching on Vast.ai..."
     echo ""
 
-    python3 vastai_launcher.py \
+    python3 scripts/vastai_launcher.py \
         --docker-image "$FULL_IMAGE" \
         --config "$CONFIG_FILE" \
         --gpu-type "$GPU_TYPE" \
