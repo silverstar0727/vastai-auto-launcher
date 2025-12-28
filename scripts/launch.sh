@@ -76,6 +76,10 @@ check_env() {
         missing+=("VAST_API_KEY")
     fi
 
+    if [ -z "$WANDB_API_KEY" ]; then
+        missing+=("WANDB_API_KEY")
+    fi
+
     if [ ${#missing[@]} -gt 0 ]; then
         log_error "Missing required environment variables:"
         for var in "${missing[@]}"; do
@@ -83,7 +87,8 @@ check_env() {
         done
         echo ""
         echo "Set them in your shell or create a .env file:"
-        echo "  export VAST_API_KEY=your_key"
+        echo "  export VAST_API_KEY=your_vastai_api_key"
+        echo "  export WANDB_API_KEY=your_wandb_api_key"
         exit 1
     fi
 }

@@ -322,9 +322,20 @@ def parse_args():
 def main():
     args = parse_args()
 
+    missing = []
     if not args.api_key:
-        print("Error: VAST_API_KEY not set")
-        print("  Set via --api-key or VAST_API_KEY environment variable")
+        missing.append("VAST_API_KEY")
+    if not args.wandb_key:
+        missing.append("WANDB_API_KEY")
+
+    if missing:
+        print("Error: Missing required environment variables:")
+        for var in missing:
+            print(f"  - {var}")
+        print()
+        print("Set them in your shell or create a .env file:")
+        print("  export VAST_API_KEY=your_vastai_api_key")
+        print("  export WANDB_API_KEY=your_wandb_api_key")
         sys.exit(1)
 
     cfg = Config(
