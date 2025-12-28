@@ -21,9 +21,12 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
 # 작업 디렉토리 설정
 WORKDIR /workspace
 
+# conda 환경 PATH 설정
+ENV PATH="/venv/main/bin:$PATH"
+
 # 의존성 파일 복사 및 설치
 COPY pyproject.toml .
-RUN uv pip install --no-cache .
+RUN uv pip install --python /venv/main/bin/python --no-cache .
 
 # 소스 코드 복사
 COPY src/ src/
