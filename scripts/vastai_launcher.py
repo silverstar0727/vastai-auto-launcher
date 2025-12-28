@@ -46,7 +46,7 @@ class Config:
     env_vars: dict = field(default_factory=dict)
 
     # 학습 설정
-    config_file: str = "config.yaml"
+    config_file: str = "configs/config.yaml"
     extra_args: str = ""
 
 
@@ -279,7 +279,7 @@ def parse_args():
     # 학습 설정
     parser.add_argument(
         "--config", "-c",
-        default="config.yaml",
+        default="configs/config.yaml",
         help="Training config file path"
     )
     parser.add_argument(

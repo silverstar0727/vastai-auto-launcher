@@ -12,7 +12,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 REGISTRY="${REGISTRY:-docker.io}"
 IMAGE_NAME="${IMAGE_NAME:-lightning-training}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-CONFIG_FILE="${CONFIG_FILE:-config.yaml}"
+CONFIG_FILE="${CONFIG_FILE:-configs/config.yaml}"
 
 # 색상 출력
 RED='\033[0;31m'
@@ -35,7 +35,7 @@ Options:
     -r, --registry REGISTRY     Docker registry (default: docker.io)
     -n, --name NAME             Image name (default: lightning-training)
     -t, --tag TAG               Image tag (default: latest)
-    -c, --config CONFIG         Config file path (default: configs/gnn_feature_engineered.yaml)
+    -c, --config CONFIG         Config file path (default: configs/config.yaml)
     -u, --username USERNAME     Docker Hub username (required for push)
     --gpu-type TYPE             GPU type (default: "RTX 4090")
     --max-price PRICE           Max price per hour (default: 2.0)

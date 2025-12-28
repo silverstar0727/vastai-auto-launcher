@@ -25,7 +25,7 @@ else
 fi
 
 # 3. 학습 실행
-CONFIG_FILE="${CONFIG_FILE:-config.yaml}"
+CONFIG_FILE="${CONFIG_FILE:-configs/config.yaml}"
 echo "[3/3] Starting training..."
 echo "Command: python3 -u src/main.py fit -c $CONFIG_FILE $@"
 echo "=========================================="
