@@ -12,7 +12,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 REGISTRY="${REGISTRY:-docker.io}"
 IMAGE_NAME="${IMAGE_NAME:-lightning-training}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-CONFIG_FILE="${CONFIG_FILE:-config.yaml}"
+CONFIG_FILE="${CONFIG_FILE:-configs/config.yaml}"
 
 # 색상 출력
 RED='\033[0;31m'
@@ -35,7 +35,7 @@ Options:
     -r, --registry REGISTRY     Docker registry (default: docker.io)
     -n, --name NAME             Image name (default: lightning-training)
     -t, --tag TAG               Image tag (default: latest)
-    -c, --config CONFIG         Config file path (default: configs/gnn_feature_engineered.yaml)
+    -c, --config CONFIG         Config file path (default: configs/config.yaml)
     -u, --username USERNAME     Docker Hub username (required for push)
     --gpu-type TYPE             GPU type (default: "RTX 4090")
     --max-price PRICE           Max price per hour (default: 2.0)
@@ -76,6 +76,10 @@ check_env() {
         missing+=("VAST_API_KEY")
     fi
 
+    if [ -z "$WANDB_API_KEY" ]; then
+        missing+=("WANDB_API_KEY")
+    fi
+
     if [ ${#missing[@]} -gt 0 ]; then
         log_error "Missing required environment variables:"
         for var in "${missing[@]}"; do
@@ -83,7 +87,8 @@ check_env() {
         done
         echo ""
         echo "Set them in your shell or create a .env file:"
-        echo "  export VAST_API_KEY=your_key"
+        echo "  export VAST_API_KEY=your_vastai_api_key"
+        echo "  export WANDB_API_KEY=your_wandb_api_key"
         exit 1
     fi
 }
@@ -195,7 +200,7 @@ main() {
     log_info "Step 3/3: Launching on Vast.ai..."
     echo ""
 
-    python3 vastai_launcher.py \
+    python3 scripts/vastai_launcher.py \
         --docker-image "$FULL_IMAGE" \
         --config "$CONFIG_FILE" \
         --gpu-type "$GPU_TYPE" \

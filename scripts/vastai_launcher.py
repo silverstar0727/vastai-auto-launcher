@@ -46,7 +46,7 @@ class Config:
     env_vars: dict = field(default_factory=dict)
 
     # 학습 설정
-    config_file: str = "config.yaml"
+    config_file: str = "configs/config.yaml"
     extra_args: str = ""
 
 
@@ -118,7 +118,7 @@ def filter_offers(offers: list, cfg: Config) -> list:
         num_gpus = offer.get("num_gpus", 1)
 
         if (price <= cfg.max_price_per_hour and
-            num_gpus >= cfg.num_gpus and
+            num_gpus == cfg.num_gpus and
             disk_space >= cfg.min_disk_space and
             gpu_name in cfg.preferred_gpus and
             inet_down >= cfg.min_inet_down and
@@ -226,15 +226,20 @@ def launch(cfg: Config, dry_run: bool = False) -> Optional[dict]:
     env_vars = build_env_vars(cfg, str(best["id"]))
 
     # 4. 인스턴스 생성
+    # Vast.ai SSH 모드에서는 ENTRYPOINT가 덮어써지므로 onstart 스크립트로 실행
+    onstart_cmd = "cd /workspace && bash scripts/entrypoint.sh"
+
     print(f"\nCreating instance...")
     print(f"  Image: {cfg.docker_image}")
     print(f"  Config: {cfg.config_file}")
+    print(f"  Onstart: {onstart_cmd}")
 
     try:
         result = client.create_instance(
             offer_id=best["id"],
             image=cfg.docker_image,
             disk=cfg.disk_space,
+            onstart=onstart_cmd,
             env=env_vars
         )
         instance_id = result.get('new_contract')
@@ -279,7 +284,7 @@ def parse_args():
     # 학습 설정
     parser.add_argument(
         "--config", "-c",
-        default="config.yaml",
+        default="configs/config.yaml",
         help="Training config file path"
     )
     parser.add_argument(
@@ -322,9 +327,20 @@ def parse_args():
 def main():
     args = parse_args()
 
+    missing = []
     if not args.api_key:
-        print("Error: VAST_API_KEY not set")
-        print("  Set via --api-key or VAST_API_KEY environment variable")
+        missing.append("VAST_API_KEY")
+    if not args.wandb_key:
+        missing.append("WANDB_API_KEY")
+
+    if missing:
+        print("Error: Missing required environment variables:")
+        for var in missing:
+            print(f"  - {var}")
+        print()
+        print("Set them in your shell or create a .env file:")
+        print("  export VAST_API_KEY=your_vastai_api_key")
+        print("  export WANDB_API_KEY=your_wandb_api_key")
         sys.exit(1)
 
     cfg = Config(
