@@ -1,11 +1,5 @@
 FROM vastai/pytorch:2.9.1-cuda-13.0.2-py312-24.04
 
-# # 필수 패키지 설치
-# RUN rm -rf /var/lib/apt/lists/* \
-#     && apt-get update \
-#     && apt-get install -y --no-install-recommends git curl unzip \
-#     && rm -rf /var/lib/apt/lists/*
-
 # uv 설치
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
@@ -14,9 +8,6 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
     && unzip awscliv2.zip \
     && ./aws/install \
     && rm -rf awscliv2.zip aws
-
-# # Vast.ai CLI 설치
-# RUN uv pip install --system --no-cache vastai
 
 # 작업 디렉토리 설정
 WORKDIR /workspace
