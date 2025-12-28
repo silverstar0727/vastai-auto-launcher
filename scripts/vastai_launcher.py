@@ -118,7 +118,7 @@ def filter_offers(offers: list, cfg: Config) -> list:
         num_gpus = offer.get("num_gpus", 1)
 
         if (price <= cfg.max_price_per_hour and
-            num_gpus >= cfg.num_gpus and
+            num_gpus == cfg.num_gpus and
             disk_space >= cfg.min_disk_space and
             gpu_name in cfg.preferred_gpus and
             inet_down >= cfg.min_inet_down and
