@@ -226,15 +226,20 @@ def launch(cfg: Config, dry_run: bool = False) -> Optional[dict]:
     env_vars = build_env_vars(cfg, str(best["id"]))
 
     # 4. 인스턴스 생성
+    # Vast.ai SSH 모드에서는 ENTRYPOINT가 덮어써지므로 onstart 스크립트로 실행
+    onstart_cmd = "cd /workspace && bash scripts/entrypoint.sh"
+
     print(f"\nCreating instance...")
     print(f"  Image: {cfg.docker_image}")
     print(f"  Config: {cfg.config_file}")
+    print(f"  Onstart: {onstart_cmd}")
 
     try:
         result = client.create_instance(
             offer_id=best["id"],
             image=cfg.docker_image,
             disk=cfg.disk_space,
+            onstart=onstart_cmd,
             env=env_vars
         )
         instance_id = result.get('new_contract')
