@@ -23,7 +23,7 @@ WORKDIR /workspace
 
 # 의존성 파일 복사 및 설치
 COPY pyproject.toml .
-RUN uv pip install --system --no-cache .
+RUN uv pip install --no-cache .
 
 # 소스 코드 복사
 COPY src/ src/
