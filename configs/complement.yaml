@@ -1,0 +1,72 @@
+name: complement
+version: v1
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: 16-mixed
+  max_epochs: 40
+  deterministic: true
+  callbacks:
+    - class_path: WandbAlert
+      init_args:
+        monitor: ${model_ckpt.monitor}
+        mode: ${model_ckpt.mode}
+
+model:
+  class_path: ComplementModel
+  init_args:
+    net:
+      class_path: ComplementNet
+      init_args:
+        num_items: 600000
+        item_embed_size: 256
+        text_embed_size: 512
+        text_project_size: 128
+        n_markets: 0
+        market_embed_size: 64
+        n_categories: 0
+        category_embed_size: 64
+        num_hidden_layers: 1
+        last_hidden_units: 256
+        item_dropout_prob: 0.0
+        use_item_emb_in_item_tower: true
+    num_items: 180000
+    negative_sampling: false
+    top_k: 50
+    lr: 0.001
+    weight_decay: 0.0
+
+data:
+  class_path: ComplementDataModule
+  init_args:
+    interaction_dir: /home/jeongmindo/projects/data/complement/interaction
+    order_path: /home/jeongmindo/projects/data/sql/order.csv
+    goods_path: /home/jeongmindo/projects/data/sql/goods.csv
+    category_path: /home/jeongmindo/projects/data/sql/category.csv
+    standard_category_path: /home/jeongmindo/projects/data/sql/standard_category.csv
+    pretrained_text_path: /home/jeongmindo/projects/data/pretrained_text/distiluse-base-multilingual-cased
+    cache_dir: /home/jeongmindo/projects/data/complement/cache
+    max_len: 100
+    batch_size: 256
+    max_interaction_items: 180000
+    max_ordered_items: 400000
+    min_actions_per_user: 50
+    max_test_samples: 200000
+    num_test_samples_per_user: 10
+    deny_condition_min_click: 30000
+    deny_condition_events_per_click: 0.02
+    negative_sampling: false
+    num_workers: 0
+    seed: 42
+
+early_stopping:
+  monitor: val/NDCG_50
+  patience: 5
+  mode: max
+
+model_ckpt:
+  monitor: val/NDCG_50
+  mode: max
+  filename: "best-ep={epoch:02d}-ndcg={val/NDCG_50:.4f}"
+  auto_insert_metric_name: false

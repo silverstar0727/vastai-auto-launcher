@@ -1,1 +1,1 @@
-python3 -u src/main.py fit -c configs/config.yaml $@
+python3 -u src/main.py fit -c configs/bert.yaml $@

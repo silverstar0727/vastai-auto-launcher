@@ -25,8 +25,10 @@ class WandbAlert(L.Callback):
             return
         if self.monitor_op(trainer.callback_metrics[self.monitor], self.best_metric):
             self.best_metric = trainer.callback_metrics[self.monitor]
+            val_loss = trainer.callback_metrics.get('val/loss', None)
+            val_loss_str = f"\nval_loss={val_loss:.6f}" if val_loss is not None else ""
             trainer.logger.experiment.alert(
                 title="Metric improved",
-                text=f"{self.monitor}={self.best_metric:.4f}\nval_loss={trainer.callback_metrics['val/loss']:.6f}\nepoch={trainer.current_epoch}",
+                text=f"{self.monitor}={self.best_metric:.4f}{val_loss_str}\nepoch={trainer.current_epoch}",
                 wait_duration=1,
             )
