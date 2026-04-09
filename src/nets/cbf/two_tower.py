@@ -12,7 +12,6 @@ from nets.cbf.feature_layers import (
     get_process_output_size,
 )
 from utils.constants import CKPT_FILENAME, FeatureField
-from utils.seed import fix_random_seed_as
 
 
 class L2Norm(nn.Module):

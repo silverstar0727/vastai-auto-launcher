@@ -10,7 +10,6 @@ from torchmetrics import Metric
 from nets.cbf.two_tower import CBFNet
 from utils.accuracy import recalls_and_ndcgs_for_ks
 from utils.constants import FeatureField
-from utils.seed import fix_random_seed_as
 
 
 # --- Metrics (from pl_metrics.py + pl_callbacks.py) ---
@@ -109,7 +108,6 @@ class CBFModel(L.LightningModule):
         bias_correction: bool = False,
         num_hidden_layers: int = 1,
         last_hidden_units: int = 256,
-        model_init_seed: int = 0,
         item_dropout_prob: float = 0.0,
         normalize_outputs: bool = False,
         optimizer_params: Optional[Dict] = None,
@@ -129,8 +127,6 @@ class CBFModel(L.LightningModule):
 
         dm = self.trainer.datamodule
 
-        # 원본과 동일하게 모델 초기화 직전에 seed 설정
-        fix_random_seed_as(self.hparams.model_init_seed)
 
         self.net = CBFNet(
             num_items=dm.num_items,

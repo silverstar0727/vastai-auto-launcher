@@ -1,7 +1,7 @@
 name: cbf
 version: v1
 
-seed_everything: false
+seed_everything: 42
 
 trainer:
   accelerator: auto
@@ -20,7 +20,6 @@ model:
     bias_correction: false
     num_hidden_layers: 1
     last_hidden_units: 256
-    model_init_seed: 0
     item_dropout_prob: 0.0
     normalize_outputs: false
     optimizer_params:
