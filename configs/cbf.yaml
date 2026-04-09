@@ -1,0 +1,79 @@
+name: cbf
+version: v1
+
+seed_everything: false
+
+trainer:
+  accelerator: auto
+  precision: 16-mixed
+  max_epochs: 20
+  deterministic: true
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+
+model:
+  class_path: CBFModel
+  init_args:
+    top_k: 50
+    negative_sampling: true
+    softmax_temperature: 1.0
+    bias_correction: false
+    num_hidden_layers: 1
+    last_hidden_units: 256
+    model_init_seed: 0
+    item_dropout_prob: 0.0
+    normalize_outputs: false
+    optimizer_params:
+      optimizer: adam
+      lr: 0.001
+      weight_decay: 0.0
+      lr_scheduler: null
+      lr_scheduler_step: 20
+      lr_scheduler_gamma: 0.1
+
+data:
+  class_path: CBFDataModule
+  init_args:
+    raw_dataset_root: /path/to/interaction
+    pretrained_root: /path/to/pretrained_text
+    sql_dataset_root: /path/to/sql
+    model_path: /path/to/output
+    goods_filename: /path/to/goods.csv
+    category_filename: /path/to/category.csv
+    standard_category_filename: /path/to/standard_category.csv
+    user_filename: /path/to/users.csv
+    min_actions_per_user: 50
+    max_items: 1000000
+    batch_size: 1024
+    test_batch_size: 1024
+    max_len: 200
+    num_workers: 0
+    drop_last_batch: true
+    item_embed_size: 256
+    item_vocabulary_size: 120000
+    use_age_info: true
+    use_in_house_text_embed: true
+    use_item_emb_in_item_tower: false
+    use_attr: false
+    market_embed_size: 128
+    category_embed_size: 128
+    price_group_embed_size: 0
+    negative_sampling: true
+    bias_correction: false
+    max_test_samples: 200000
+    num_test_samples_per_user: 10
+    dataloader_random_seed: 0.0
+    save_preprocessed_data: true
+
+early_stopping:
+  monitor: val/NDCG_50
+  patience: 20
+  mode: max
+
+model_ckpt:
+  monitor: val/NDCG_50
+  mode: max
+  filename: "best_acc_model"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1

@@ -1,3 +1,5 @@
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,139 +7,155 @@ import torch.nn.functional as F
 import lightning as L
 from torchmetrics import Metric
 
+from nets.cbf.two_tower import CBFNet
+from utils.accuracy import recalls_and_ndcgs_for_ks
+from utils.constants import FeatureField
+from utils.seed import fix_random_seed_as
+
+
+# --- Metrics (from pl_metrics.py + pl_callbacks.py) ---
+
 
 class LossAccumulator(Metric):
-    full_state_update = False
-
-    def __init__(self):
-        super().__init__()
+    def __init__(self, dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.add_state("loss_sum", default=torch.tensor(0.0))
         self.add_state("total", default=torch.tensor(0))
-        self.add_state("loss", default=torch.tensor(0.0))
 
     def update(self, loss):
-        self.loss += loss
+        self.loss_sum += loss.detach()
         self.total += 1
 
-    def compute(self):
-        return self.loss / self.total
+    def compute(self, reset=True):
+        avg_loss = self.loss_sum / self.total
+        if reset:
+            self.reset()
+        return avg_loss
 
 
-class AccuracyAndCoverage(Metric):
-    full_state_update = False
-
-    def __init__(self, num_items: int, top_k: int = 50):
-        super().__init__()
+class Accuracy(Metric):
+    def __init__(self, top_k=50, dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
         self.add_state("total", default=torch.tensor(0))
-        self.add_state("ndcg", default=torch.tensor(0.0))
-        self.add_state("recall", default=torch.tensor(0.0))
+        self.add_state("NDCG", default=torch.tensor(0.0))
+        self.add_state("Recall", default=torch.tensor(0.0))
         self.top_k = top_k
-        self.num_items = num_items
-        self.cover_items = set()
+        self.compute_on_step = False
 
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        batch_rank_items = preds.argsort(dim=1, descending=True)[:, : self.top_k]
-        metrics = self._recalls_and_ndcgs(batch_rank_items, target)
-        self.ndcg += metrics["ndcg"]
-        self.recall += metrics["recall"]
+    def update(self, batch_scores: torch.Tensor, batch_positive_items: torch.Tensor):
+        batch_rank_items = batch_scores.argsort(dim=1, descending=True)[:, : self.top_k]
+        metrics = recalls_and_ndcgs_for_ks(batch_rank_items, batch_positive_items, [self.top_k])
+        self.NDCG += metrics[f"NDCG_{self.top_k}"]
+        self.Recall += metrics[f"Recall_{self.top_k}"]
         self.total += 1
-        self.cover_items.update(batch_rank_items.cpu().numpy().reshape(-1).tolist())
 
     def compute(self):
         scores = {
-            f"NDCG_{self.top_k}": self.ndcg / self.total,
-            f"Recall_{self.top_k}": self.recall / self.total,
-            f"Coverage_{self.top_k}": len(self.cover_items) / self.num_items,
+            f"NDCG_{self.top_k}": self.NDCG / self.total,
+            f"Recall_{self.top_k}": self.Recall / self.total,
         }
         self.cover_items = set()
+        self.reset()
         return scores
 
-    def _recalls_and_ndcgs(self, batch_rank_items, batch_positive_items):
-        batch_size = batch_rank_items.size(0)
-        recall_sum = 0.0
-        ndcg_sum = 0.0
 
-        for i in range(batch_size):
-            rank_items = batch_rank_items[i]
-            positive_items = batch_positive_items[i]
-            positive_items = positive_items[positive_items > 0]
+class Coverage(Metric):
+    def __init__(self, num_items, top_k=50, dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.top_k = top_k
+        self.num_items = num_items
+        self.cover_items = set()
+        self.compute_on_step = False
 
-            hit_mask = torch.isin(rank_items, positive_items)
-            num_hits = hit_mask.sum().float()
-            num_positives = max(positive_items.numel(), 1)
+    def update(self, batch_scores: torch.Tensor):
+        batch_rank_items = batch_scores.argsort(dim=1, descending=True)[:, : self.top_k]
+        ret_items = set(batch_rank_items.cpu().numpy().reshape(-1,))
+        self.cover_items = self.cover_items.union(ret_items)
 
-            recall_sum += (num_hits / num_positives).item()
-
-            if num_hits > 0:
-                positions = torch.where(hit_mask)[0].float() + 1
-                dcg = (1.0 / torch.log2(positions + 1)).sum()
-                ideal_positions = torch.arange(1, num_hits.int().item() + 1, dtype=torch.float32)
-                idcg = (1.0 / torch.log2(ideal_positions + 1)).sum()
-                ndcg_sum += (dcg / idcg).item()
-
-        return {
-            "recall": recall_sum / batch_size,
-            "ndcg": ndcg_sum / batch_size,
+    def compute(self):
+        scores = {
+            f"Coverage_Percentage_{self.top_k}": len(self.cover_items) / self.num_items,
+            f"Coverage_Counts_{self.top_k}": len(self.cover_items),
         }
+        self.cover_items = set()
+        self.reset()
+        return scores
+
+
+# --- Helper function ---
+
+
+def create_target_scores(pred_scores, batch_pos_labels, in_batch_pos_items):
+    target_scores = torch.zeros_like(pred_scores)
+
+    for i, pos_labels in enumerate(batch_pos_labels):
+        pos_items = pos_labels[pos_labels > 0]
+        _, pos_items_in_target_scores = (pos_items.reshape(-1, 1) == in_batch_pos_items.reshape(1, -1)).nonzero(
+            as_tuple=True
+        )
+        target_scores[i, pos_items_in_target_scores] = 1.0
+    return target_scores
+
+
+# --- LightningModule ---
 
 
 class CBFModel(L.LightningModule):
-    """Content-Based Filtering LightningModule.
-
-    Wraps CBFNet and handles:
-        - Training with negative sampling or full softmax
-        - Validation / test with NDCG@K, Recall@K, Coverage@K
-        - Optimizer configuration (Adam / AdamW + optional StepLR)
-    """
-
     def __init__(
         self,
-        net: nn.Module,
-        num_items: int,
+        top_k: int = 50,
         negative_sampling: bool = True,
         softmax_temperature: float = 1.0,
         bias_correction: bool = False,
-        top_k: int = 50,
-        lr: float = 0.001,
-        weight_decay: float = 0.0,
-        optimizer_type: str = "adam",
-        lr_scheduler: str | None = None,
-        lr_scheduler_step: int = 20,
-        lr_scheduler_gamma: float = 0.1,
-    ) -> None:
+        num_hidden_layers: int = 1,
+        last_hidden_units: int = 256,
+        model_init_seed: int = 0,
+        item_dropout_prob: float = 0.0,
+        normalize_outputs: bool = False,
+        optimizer_params: Optional[Dict] = None,
+    ):
         super().__init__()
-        self.save_hyperparameters(ignore=["net"])
-        self.net = net
+        self.save_hyperparameters()
 
-        self.negative_sampling = negative_sampling
-        self.softmax_temperature = softmax_temperature
-        self.bias_correction = bias_correction
-
-        self.val_metric = AccuracyAndCoverage(num_items=num_items, top_k=top_k)
-        self.test_metric = AccuracyAndCoverage(num_items=num_items, top_k=top_k)
-        self.loss_acc = LossAccumulator()
+        # net은 setup()에서 DataModule의 전처리 결과를 읽어 초기화
+        self.net = None
+        self.accuracy_metric = None
+        self.coverage_metric = None
+        self.loss_acc = None
 
     def setup(self, stage):
-        dm = getattr(self.trainer, "datamodule", None)
-        if dm is not None:
-            if hasattr(dm, "text_embeddings"):
-                self.net.set_text_embeddings(dm.text_embeddings)
-            if hasattr(dm, "item_markets") and hasattr(dm, "item_categories"):
-                self.net.set_item_features(
-                    item_markets=dm.item_markets,
-                    item_categories=dm.item_categories,
-                )
+        if self.net is not None:
+            return
 
-    def forward(self, user_features, item_idxes=None):
-        return self.net(user_features, item_idxes)
+        dm = self.trainer.datamodule
+
+        # 원본과 동일하게 모델 초기화 직전에 seed 설정
+        fix_random_seed_as(self.hparams.model_init_seed)
+
+        self.net = CBFNet(
+            num_items=dm.num_items,
+            features=dm.features,
+            user_tower_features=dm.user_feat_names,
+            item_tower_features=dm.item_feat_names,
+            item_feat_values=dm.item_feat_values,
+            num_hidden_layers=self.hparams.num_hidden_layers,
+            last_hidden_units=self.hparams.last_hidden_units,
+            item_dropout_prob=self.hparams.item_dropout_prob,
+            normalize_outputs=self.hparams.normalize_outputs,
+        )
+
+        self.accuracy_metric = Accuracy(self.hparams.top_k)
+        self.coverage_metric = Coverage(dm.num_items, self.hparams.top_k)
+        self.loss_acc = LossAccumulator()
 
     def training_step(self, batch, batch_idx):
-        if self.negative_sampling:
-            if self.bias_correction:
+        if self.hparams.negative_sampling:
+            if self.hparams.bias_correction:
                 inputs, batch_pos_labels, batch_pos_probs = batch
                 non_zero_idxes = batch_pos_labels > 0
                 in_batch_pos_items = torch.unique(batch_pos_labels[non_zero_idxes])
 
-                in_batch_pos_probs = torch.zeros_like(in_batch_pos_items, dtype=torch.float)
+                in_batch_pos_probs = torch.zeros_like(in_batch_pos_items).float()
                 _, pos_idxes = (batch_pos_labels[non_zero_idxes][:, None] == in_batch_pos_items).nonzero(as_tuple=True)
                 in_batch_pos_probs[pos_idxes] = batch_pos_probs[non_zero_idxes]
             else:
@@ -146,131 +164,93 @@ class CBFModel(L.LightningModule):
                 in_batch_pos_probs = None
 
             pred_scores = self.net(inputs, in_batch_pos_items)
-            target_scores = _create_target_scores(pred_scores, batch_pos_labels, in_batch_pos_items)
+            target_scores = create_target_scores(pred_scores, batch_pos_labels, in_batch_pos_items)
 
-            pred_scores = pred_scores / self.softmax_temperature
-            if self.bias_correction and in_batch_pos_probs is not None:
+            pred_scores = pred_scores / self.hparams.softmax_temperature
+            if self.hparams.bias_correction:
                 pred_scores = pred_scores - in_batch_pos_probs.log().unsqueeze(0)
-            loss = -torch.mean(torch.sum(F.log_softmax(pred_scores, dim=1) * target_scores, dim=-1))
+            loss = -torch.mean(torch.sum(F.log_softmax(pred_scores, 1) * target_scores, -1))
         else:
             inputs, labels = batch
             scores = self.net(inputs)
-            scores = scores / self.softmax_temperature
+            scores = scores / self.hparams.softmax_temperature
 
-            logits_ignore_unknown = scores[:, 1:]
-            targets_ignore_unknown = labels[:, 1:]
+            logits_ignore_unknown_index = scores[:, 1:]
+            targets_ignore_unknown_index = labels[:, 1:]
             loss = -torch.mean(
-                torch.sum(F.log_softmax(logits_ignore_unknown, dim=1) * targets_ignore_unknown, dim=-1)
+                torch.sum(F.log_softmax(logits_ignore_unknown_index, 1) * targets_ignore_unknown_index, -1)
             )
-
-        self.loss_acc.update(loss)
+        self.loss_acc(loss)
         return loss
 
-    def on_train_epoch_end(self) -> None:
+    def on_train_epoch_end(self):
         avg_loss = self.loss_acc.compute()
         self.log("train/loss", avg_loss)
 
-    def validation_step(self, batch, batch_idx):
-        inputs, batch_pos_labels = batch
+    def validation_step(self, val_batch, batch_idx):
+        inputs, batch_pos_labels = val_batch
 
-        if self.negative_sampling:
-            if self.bias_correction:
+        if self.hparams.negative_sampling:
+            if self.hparams.bias_correction:
                 in_batch_items = torch.unique(batch_pos_labels[batch_pos_labels > 0])
             else:
-                in_batch_items = torch.unique(batch_pos_labels.reshape(-1))
+                in_batch_items = torch.unique(batch_pos_labels.reshape(-1,))
             pred_scores = self.net(inputs, in_batch_items)
 
-            # Remap positive labels to in-batch item indices for metric computation
             targets = []
-            for pos_labels in batch_pos_labels:
+            for i, pos_labels in enumerate(batch_pos_labels):
                 pos_items = pos_labels[pos_labels > 0]
-                _, pos_loc = (pos_items.reshape(-1, 1) == in_batch_items.reshape(1, -1)).nonzero(as_tuple=True)
-                targets.append(pos_loc.reshape(1, -1))
+                _, pos_loc_in_batch_items = (pos_items.reshape(-1, 1) == in_batch_items.reshape(1, -1)).nonzero(
+                    as_tuple=True
+                )
+                targets.append(pos_loc_in_batch_items.reshape(1, -1))
             targets = torch.cat(targets, dim=0)
+
         else:
+            inputs, targets = val_batch
             pred_scores = self.net(inputs)
-            targets = batch_pos_labels
 
-        self.val_metric.update(pred_scores, targets)
+        self.accuracy_metric.update(pred_scores, targets)
 
-    def on_validation_epoch_end(self) -> None:
-        metrics = self.val_metric.compute()
-        for k, v in metrics.items():
+    def on_validation_epoch_end(self):
+        dict_ = self.accuracy_metric.compute()
+        for k, v in dict_.items():
             self.log(f"val/{k}", v, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
-        inputs, batch_pos_labels = batch
+        return self.validation_step(batch, batch_idx)
 
-        if self.negative_sampling:
-            if self.bias_correction:
-                in_batch_items = torch.unique(batch_pos_labels[batch_pos_labels > 0])
-            else:
-                in_batch_items = torch.unique(batch_pos_labels.reshape(-1))
-            pred_scores = self.net(inputs, in_batch_items)
-
-            targets = []
-            for pos_labels in batch_pos_labels:
-                pos_items = pos_labels[pos_labels > 0]
-                _, pos_loc = (pos_items.reshape(-1, 1) == in_batch_items.reshape(1, -1)).nonzero(as_tuple=True)
-                targets.append(pos_loc.reshape(1, -1))
-            targets = torch.cat(targets, dim=0)
-        else:
-            pred_scores = self.net(inputs)
-            targets = batch_pos_labels
-
-        self.test_metric.update(pred_scores, targets)
-
-    def on_test_epoch_end(self) -> None:
-        metrics = self.test_metric.compute()
-        for k, v in metrics.items():
-            self.log(f"test/{k}", v)
+    def on_test_epoch_end(self):
+        self.on_validation_epoch_end()
 
     def configure_optimizers(self):
-        optimizer_name = self.hparams.optimizer_type.lower()
+        params = self.hparams.optimizer_params or {}
+        optimizer_name = params.get("optimizer", "adam").lower()
         if optimizer_name == "adamw":
             optimizer = torch.optim.AdamW(
                 self.parameters(),
-                lr=self.hparams.lr,
-                weight_decay=self.hparams.weight_decay,
+                lr=params.get("lr", 1e-3),
+                weight_decay=params.get('weight_decay', 1e-3),
             )
         elif optimizer_name == "adam":
             optimizer = torch.optim.Adam(
                 self.parameters(),
-                lr=self.hparams.lr,
-                weight_decay=self.hparams.weight_decay,
+                lr=params.get('lr', 1e-3),
+                weight_decay=params.get('weight_decay', 0.0),
             )
         else:
             raise ValueError(f"Invalid optimizer name: {optimizer_name}")
 
-        if self.hparams.lr_scheduler is None:
+        lr_scheduler_name = params.get('lr_scheduler', None)
+        if lr_scheduler_name is None:
             return optimizer
 
-        if self.hparams.lr_scheduler == "step":
+        if lr_scheduler_name == 'step':
             scheduler = torch.optim.lr_scheduler.StepLR(
                 optimizer=optimizer,
-                step_size=self.hparams.lr_scheduler_step,
-                gamma=self.hparams.lr_scheduler_gamma,
+                step_size=params.get('lr_scheduler_step', 10),
+                gamma=params.get('lr_scheduler_gamma', 0.1),
             )
         else:
-            raise ValueError(f"Invalid lr_scheduler name: {self.hparams.lr_scheduler}")
-
+            raise ValueError(f"Invalid lr_scheduler name: {lr_scheduler_name}")
         return [optimizer], [scheduler]
-
-
-def _create_target_scores(pred_scores, batch_pos_labels, in_batch_pos_items):
-    """Build one-hot target tensor aligned to in-batch positive items.
-
-    Args:
-        pred_scores: (N, len(in_batch_pos_items))
-        batch_pos_labels: (N, max_pos_items) with zero-padding
-        in_batch_pos_items: (K,) unique positive items in batch
-
-    Returns:
-        target_scores: (N, K) with 1.0 at positive positions
-    """
-    target_scores = torch.zeros_like(pred_scores)
-    for i, pos_labels in enumerate(batch_pos_labels):
-        pos_items = pos_labels[pos_labels > 0]
-        _, pos_in_target = (pos_items.reshape(-1, 1) == in_batch_pos_items.reshape(1, -1)).nonzero(as_tuple=True)
-        target_scores[i, pos_in_target] = 1.0
-    return target_scores
