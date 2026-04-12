@@ -1,4 +1,4 @@
-name: cbf-cosine-warmup
+name: cbf-cosine-warmup-bs512
 version: v1
 
 seed_everything: 42
@@ -44,8 +44,8 @@ data:
     user_filename: /home/jeongmindo/projects/ably/data/sql/member.csv
     min_actions_per_user: 50
     max_items: 1000000
-    batch_size: 128
-    test_batch_size: 128
+    batch_size: 512
+    test_batch_size: 512
     max_len: 200
     num_workers: 0
     drop_last_batch: true
