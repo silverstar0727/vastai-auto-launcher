@@ -1,0 +1,85 @@
+name: multi_interest
+version: v1
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: 16-mixed
+  max_epochs: 10
+  deterministic: true
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+
+model:
+  class_path: MultiInterestModel
+  init_args:
+    # 모델 아키텍처
+    embedding_size: 128
+    use_item_bias: true
+    attention_size: 8
+    interest_count: 4
+    # 학습 설정
+    use_rank_learning: false
+    soft_selection: false
+    # 평가 설정
+    top_k: 10
+    # 옵티마이저 (기본: Adam + StepLR)
+    optimizer_params:
+      optimizer: adam
+      lr: 0.001
+      weight_decay: 0.0
+      lr_scheduler: step
+      lr_scheduler_step: 4
+      lr_scheduler_gamma: 0.1
+
+data:
+  class_path: MultiInterestDataModule
+  init_args:
+    # 데이터 경로
+    raw_dataset_root: /home/jeongmindo/projects/ably/data/bert/interaction
+    sql_dataset_root: /home/jeongmindo/projects/ably/data/sql
+    model_path: /home/jeongmindo/projects/ably/data/output/multi_interest
+    goods_filename: /home/jeongmindo/projects/ably/data/sql/goods.csv
+    category_filename: /home/jeongmindo/projects/ably/data/sql/category.csv
+    standard_category_filename: /home/jeongmindo/projects/ably/data/sql/standard_category.csv
+    user_filename: /home/jeongmindo/projects/ably/data/sql/member.csv
+    # 데이터 필터링
+    min_actions_per_user: 100
+    max_items: 300000
+    # 배치 설정
+    batch_size: 2048
+    test_batch_size: 64
+    max_len: 80
+    num_workers: 2
+    drop_last_batch: true
+    # 학습 샘플 설정 (kubeflow production 값 반영)
+    num_train_sample_per_user: 60
+    preference_event_weight: 40.0
+    next_items_window_size: 5
+    final_item_sampling_weight: 3.0
+    final_item_score: 1.0
+    use_rank_learning: false
+    # 아이템 학습 가중치 (기본 비활성)
+    use_item_train_weight: false
+    goods_train_weight_root: ""
+    # 데이터 분할
+    max_test_samples: 200000
+    num_test_samples_per_user: 1
+    # 시드
+    dataloader_random_seed: 0.0
+    # 기타
+    save_preprocessed_data: false
+
+early_stopping:
+  monitor: val/NDCG_10
+  patience: 5
+  mode: max
+
+model_ckpt:
+  monitor: val/NDCG_10
+  mode: max
+  filename: "best_acc_model"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1

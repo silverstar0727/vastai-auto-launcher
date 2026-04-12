@@ -1,0 +1,1 @@
+from .multi_interest_net import MultiInterestNet

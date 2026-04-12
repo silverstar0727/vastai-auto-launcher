@@ -1,9 +1,6 @@
 #!/bin/bash
 set -e
 
-echo "===== Sleeping 6 hours to wait for current run ====="
-sleep 6h
-
 cd /home/jeongmindo/projects/ably/reco-lightning
 
 echo "===== Clean caches ====="
