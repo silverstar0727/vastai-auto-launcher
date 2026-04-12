@@ -52,7 +52,6 @@ class ComplementNet(nn.Module):
 
     CBFNet과 동일한 아키텍처이지만:
     - 카테고리 side feat에 ITEM_CATEGORY 사용 (ITEM_STANDARD_CATEGORY 대신)
-    - normalize_outputs / L2Norm 미사용
     """
 
     def __init__(
@@ -65,6 +64,7 @@ class ComplementNet(nn.Module):
         num_hidden_layers=1,
         last_hidden_units=256,
         item_dropout_prob=0,
+        normalize_outputs=False,
     ):
         super().__init__()
         self.num_items = num_items
@@ -72,6 +72,7 @@ class ComplementNet(nn.Module):
         self.item_tower_features = item_tower_features
         self.item_feat_values = item_feat_values
         self.item_dropout_prob = item_dropout_prob
+        self.normalize_outputs = normalize_outputs
         self.serving = False
 
         self._hparams = Checkpoint.get_hparams(
@@ -81,14 +82,17 @@ class ComplementNet(nn.Module):
             num_items=num_items,
             num_hidden_layers=num_hidden_layers,
             last_hidden_units=last_hidden_units,
+            normalize_outputs=normalize_outputs,
         )
 
         self.feature_process_modules = torch.nn.ModuleDict(build_feature_layers(features))
         self.user_tower = create_tower_layers(
             features, user_tower_features, num_hidden_layers, last_hidden_units,
+            l2_norm=normalize_outputs,
         )
         self.item_tower = create_tower_layers(
             features, item_tower_features, num_hidden_layers, last_hidden_units,
+            l2_norm=normalize_outputs,
         )
 
     def forward(self, user_features: Dict, item_idxes: Optional[torch.Tensor] = None):

@@ -7,6 +7,7 @@ import lightning as L
 from torchmetrics import Metric
 
 from nets.complement.two_tower import ComplementNet
+from optimizers.linear_warmup import LinearWarmupCosineAnnealingLR
 from utils.accuracy import recalls_and_ndcgs_for_ks
 from utils.constants import FeatureField
 
@@ -103,6 +104,9 @@ class ComplementModel(L.LightningModule):
         self,
         top_k: int = 50,
         negative_sampling: bool = False,
+        softmax_temperature: float = 1.0,
+        normalize_outputs: bool = False,
+        mean_loss: bool = False,
         num_hidden_layers: int = 1,
         last_hidden_units: int = 256,
         item_dropout_prob: float = 0.0,
@@ -131,11 +135,22 @@ class ComplementModel(L.LightningModule):
             num_hidden_layers=self.hparams.num_hidden_layers,
             last_hidden_units=self.hparams.last_hidden_units,
             item_dropout_prob=self.hparams.item_dropout_prob,
+            normalize_outputs=self.hparams.normalize_outputs,
         )
 
         self.accuracy_metric = Accuracy(self.hparams.top_k)
         self.coverage_metric = Coverage(dm.num_items, self.hparams.top_k)
         self.loss_acc = LossAccumulator()
+
+    def _compute_loss(self, scores, labels):
+        """mean_loss: positive 수로 나눠서 유저 간 동등한 기여."""
+        tau = self.hparams.softmax_temperature
+        log_probs = F.log_softmax(scores / tau, dim=1)
+        per_sample = torch.sum(log_probs * labels, dim=-1)
+        if self.hparams.mean_loss:
+            pos_counts = labels.sum(dim=-1).clamp(min=1)
+            per_sample = per_sample / pos_counts
+        return -torch.mean(per_sample)
 
     def training_step(self, batch, batch_idx):
         if self.hparams.negative_sampling:
@@ -145,16 +160,12 @@ class ComplementModel(L.LightningModule):
             pred_scores = self.net(inputs, in_batch_pos_items)
             target_scores = create_target_scores(pred_scores, batch_pos_labels, in_batch_pos_items)
 
-            loss = -torch.mean(torch.sum(F.log_softmax(pred_scores, 1) * target_scores, -1))
+            loss = self._compute_loss(pred_scores, target_scores)
         else:
             inputs, labels = batch
             scores = self.net(inputs)
 
-            logits_ignore_unknown_index = scores[:, 1:]
-            targets_ignore_unknown_index = labels[:, 1:]
-            loss = -torch.mean(
-                torch.sum(F.log_softmax(logits_ignore_unknown_index, 1) * targets_ignore_unknown_index, -1)
-            )
+            loss = self._compute_loss(scores[:, 1:], labels[:, 1:])
         self.loss_acc(loss)
         return loss
 
@@ -222,6 +233,14 @@ class ComplementModel(L.LightningModule):
                 optimizer=optimizer,
                 step_size=params.get("lr_scheduler_step", 10),
                 gamma=params.get("lr_scheduler_gamma", 0.1),
+            )
+        elif lr_scheduler_name == "cosine":
+            scheduler = LinearWarmupCosineAnnealingLR(
+                optimizer=optimizer,
+                warmup_epochs=params.get("lr_scheduler_warmup_epochs", 5),
+                max_epochs=self.trainer.max_epochs,
+                warmup_start_lr=params.get("lr_scheduler_warmup_start_lr", 0.0),
+                eta_min=params.get("lr_scheduler_eta_min", 1e-5),
             )
         else:
             raise ValueError(f"Invalid lr_scheduler name: {lr_scheduler_name}")

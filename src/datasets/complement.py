@@ -260,7 +260,7 @@ class ComplementDataModule(L.LightningDataModule):
         hp = self.hparams
         raw_dataset_root = Path(hp.raw_dataset_root)
         model_path = Path(hp.model_path)
-        preprocessed_root = raw_dataset_root.joinpath("preprocessed")
+        preprocessed_root = model_path.joinpath("preprocessed")
 
         os.makedirs(model_path, exist_ok=True)
         os.makedirs(preprocessed_root, exist_ok=True)
@@ -400,8 +400,8 @@ class ComplementDataModule(L.LightningDataModule):
 
     def _load_dataset_handler(self, preprocess_result: PreprocessResult, feature_names: List[str]) -> DatasetHandler:
         hp = self.hparams
-        raw_dataset_root = Path(hp.raw_dataset_root)
-        preprocessed_root = raw_dataset_root.joinpath("preprocessed")
+        model_path = Path(hp.model_path)
+        preprocessed_root = model_path.joinpath("preprocessed")
         dataset_path = preprocessed_root.joinpath("dataset.pkl")
 
         if dataset_path.is_file():

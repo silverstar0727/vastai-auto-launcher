@@ -1,4 +1,4 @@
-name: complement-cosine-warmup
+name: complement-cosine-warmup-bs512
 version: v1
 
 seed_everything: 42
@@ -45,8 +45,8 @@ data:
     max_items: 400000
     max_interaction_items: 180000
     max_ordered_items: 300000
-    batch_size: 128
-    test_batch_size: 128
+    batch_size: 512
+    test_batch_size: 512
     max_len: 100
     num_workers: 0
     drop_last_batch: true
