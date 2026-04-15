@@ -1,0 +1,85 @@
+name: lightgcn
+version: v1
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: 32
+  max_epochs: 3
+  deterministic: false
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+
+model:
+  class_path: LightGCNModel
+  init_args:
+    # 모델 아키텍처
+    embedding_dim: 192
+    num_layers: 3
+    normalize: true
+    # History fusion
+    use_learned_gate: true
+    history_pooling: weighted_sum
+    # Loss
+    loss_type: ce
+    loss_temperature: 0.05
+    learnable_temperature: true
+    temperature_min: 0.03
+    temperature_max: 0.1
+    bce_pos_weight: 0.25
+    # Negative sampling
+    use_inbatch_neg: true
+    logq_correction: true
+    # 옵티마이저
+    lr: 0.005
+    weight_decay: 0.01
+    # 메트릭
+    metric_ks:
+      - 10
+      - 20
+      - 50
+
+data:
+  class_path: LightGCNDataModule
+  init_args:
+    # 데이터 경로
+    raw_dataset_root: /home/jeongmindo/projects/ably/data/lightgcn
+    model_path: /home/jeongmindo/projects/ably/data/output/lightgcn
+    event_data_dir: events
+    # 데이터 필터링
+    max_users: 2000000
+    max_items: 1000000
+    valid_ratio: 0.01
+    # 배치 설정
+    batch_size: 8192
+    test_batch_size: 8192
+    num_workers: 8
+    # Negative sampling
+    num_neg_samples: 0
+    # History
+    max_history_len: 50
+    cold_start_dropout: 0.1
+    use_learned_gate: true
+    # Log-Q correction (DataModule에서 item_freq 계산 여부 판단용)
+    logq_correction: true
+    loss_type: ce
+    use_inbatch_neg: true
+    # 캐싱
+    save_preprocessed_data: false
+    load_preprocessed_data: false
+    # 시드
+    dataloader_random_seed: 42
+
+early_stopping:
+  monitor: val/Recall_50
+  patience: 2
+  mode: max
+
+model_ckpt:
+  monitor: val/Recall_50
+  mode: max
+  filename: "best_acc_model"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1

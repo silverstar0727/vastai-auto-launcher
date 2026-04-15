@@ -154,6 +154,7 @@ class MultiInterestModel(L.LightningModule):
             self._item_train_weights = torch.FloatTensor(dm.item_train_weights)
 
         self.accuracy_metric = Accuracy(self.hparams.top_k)
+        self.std_accuracy_metric = Accuracy(50)  # 논문 표준 메트릭 @50
         self.loss_acc = LossAccumulator()
 
     def on_train_start(self):
@@ -185,8 +186,18 @@ class MultiInterestModel(L.LightningModule):
 
     def validation_step(self, val_batch, batch_idx):
         input_dict, positive_items = val_batch
+
+        # 1) 서빙 로직 메트릭 (rank-weighted interest aggregation)
         scores = self.compute_score(input_dict, remove_history=True)
         self.accuracy_metric.update(scores, positive_items)
+
+        # 2) 논문 표준 메트릭 (raw score, max over interests, history removal, full ranking)
+        out_dict = self.net(input_dict)
+        raw_prediction = out_dict[ModelOutputKey.PREDICTION]  # [B, K, V]
+        std_scores = raw_prediction.max(dim=1)[0]             # [B, V]
+        history_items = input_dict[FeatureField.CLICK_ITEMS]   # [B, max_len]
+        std_scores.scatter_(1, history_items, float("-inf"))
+        self.std_accuracy_metric.update(std_scores, positive_items)
 
     def compute_score(
         self,
@@ -263,9 +274,15 @@ class MultiInterestModel(L.LightningModule):
         return final_scores
 
     def on_validation_epoch_end(self):
+        # 서빙 로직 메트릭
         dict_ = self.accuracy_metric.compute()
         for k, v in dict_.items():
             self.log(f"val/{k}", v, prog_bar=True)
+
+        # 논문 표준 메트릭
+        std_dict = self.std_accuracy_metric.compute()
+        for k, v in std_dict.items():
+            self.log(f"val/std_{k}", v)
 
     def test_step(self, batch, batch_idx):
         return self.validation_step(batch, batch_idx)

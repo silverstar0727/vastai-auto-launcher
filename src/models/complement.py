@@ -139,6 +139,7 @@ class ComplementModel(L.LightningModule):
         )
 
         self.accuracy_metric = Accuracy(self.hparams.top_k)
+        self.std_accuracy_metric = Accuracy(self.hparams.top_k)  # 논문 표준 메트릭
         self.coverage_metric = Coverage(dm.num_items, self.hparams.top_k)
         self.loss_acc = LossAccumulator()
 
@@ -189,16 +190,28 @@ class ComplementModel(L.LightningModule):
                 targets.append(pos_loc_in_batch_items.reshape(1, -1))
             targets = torch.cat(targets, dim=0)
 
-        else:
-            inputs, targets = val_batch
-            pred_scores = self.net(inputs)
+            self.accuracy_metric.update(pred_scores, targets)
 
-        self.accuracy_metric.update(pred_scores, targets)
+            # 논문 표준 메트릭: full ranking + history removal
+            full_scores = self.net(inputs)
+        else:
+            full_scores = self.net(inputs)
+            self.accuracy_metric.update(full_scores, batch_pos_labels)
+
+        # 표준 메트릭: full ranking + history removal
+        std_scores = full_scores.clone()
+        click_items = inputs[FeatureField.CLICK_ITEMS]
+        std_scores.scatter_(1, click_items, float("-inf"))
+        self.std_accuracy_metric.update(std_scores, batch_pos_labels)
 
     def on_validation_epoch_end(self):
         dict_ = self.accuracy_metric.compute()
         for k, v in dict_.items():
             self.log(f"val/{k}", v, prog_bar=True)
+
+        std_dict = self.std_accuracy_metric.compute()
+        for k, v in std_dict.items():
+            self.log(f"val/std_{k}", v)
 
     def test_step(self, batch, batch_idx):
         return self.validation_step(batch, batch_idx)
