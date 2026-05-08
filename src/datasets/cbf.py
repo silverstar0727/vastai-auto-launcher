@@ -19,6 +19,7 @@ from nets.cbf.feature_layers import (
 )
 from utils.constants import DatasetField, FeatureField, RawDataField
 from utils.data_handler import DatasetHandler, split_data_by_users
+from utils.df_utils import read_table
 from utils.goods_info import GoodsInfo
 from utils.label_encoder import LabelEncoder, LabelEncoderPrefix
 from utils.preprocess import PreprocessResult, default_load_raw_df_items
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 def _get_on_sale_items(goods_filename):
     """판매중인 아이템 목록 반환. DefaultRawDfLoader._get_on_sale_items()와 동일."""
-    df_items = pd.read_csv(goods_filename, escapechar="\\")
+    df_items = read_table(goods_filename, escapechar="\\")
     df_items = df_items.dropna()
     return list(df_items["sno"])
 
@@ -180,6 +181,7 @@ class CBFDataModule(L.LightningDataModule):
         category_filename: str = "",
         standard_category_filename: str = "",
         user_filename: str = "",
+        order_filename: str = "",
         # 데이터 필터링
         min_actions_per_user: int = 50,
         max_items: int = 1000000,
@@ -196,6 +198,8 @@ class CBFDataModule(L.LightningDataModule):
         use_in_house_text_embed: bool = True,
         use_item_emb_in_item_tower: bool = False,
         use_attr: bool = False,
+        attr_meta_filename: str = "",
+        attr_filename: str = "",
         market_embed_size: int = 128,
         category_embed_size: int = 128,
         price_group_embed_size: int = 0,
@@ -349,7 +353,7 @@ class CBFDataModule(L.LightningDataModule):
         )
 
         interaction_filepath = Path(hp.raw_dataset_root)
-        order_filepath = Path(hp.sql_dataset_root) / "order.csv"
+        order_filepath = Path(hp.order_filename) if hp.order_filename else Path(hp.sql_dataset_root) / "order.csv"
         goods_filepath = hp.goods_filename
 
         min_actions_per_user = hp.min_actions_per_user
@@ -481,6 +485,17 @@ class CBFDataModule(L.LightningDataModule):
 
         if hp.use_item_emb_in_item_tower:
             item_features += [item_embed]
+
+        if hp.use_attr and hp.attr_meta_filename and hp.attr_filename:
+            from utils.attribute import build_attr_feat
+            attr_feat, user_attr_feat = build_attr_feat(
+                hp.model_path,
+                goods_info.df.sort_values(DatasetField.ITEM_INDEX),
+                hp.attr_meta_filename,
+                hp.attr_filename,
+            )
+            item_features += [attr_feat]
+            user_features += [user_attr_feat]
 
         if hp.use_age_info:
             f = PolynomialFeat(FeatureField.USER_AGE, layer_name=FeatureInputLayerName.USER_AGE)

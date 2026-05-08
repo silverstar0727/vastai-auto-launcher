@@ -7,6 +7,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from utils.constants import DatasetField, FeatureField
+from utils.df_utils import read_table
 from utils.label_encoder import LabelEncoder, LabelEncoderPrefix
 from nets.cbf.feature_layers import FeatureInputLayerName, SparseFeat
 
@@ -29,12 +30,12 @@ def encode_attribute(item_ids, attribute_meta_file, item2attr_file, insert_unk_p
 
 class AttrProcessor:
     def __init__(self, attribute_meta_file):
-        df_attr_meta = pd.read_csv(attribute_meta_file)
+        df_attr_meta = read_table(attribute_meta_file)
         attr_index2sno = df_attr_meta["sno"].to_dict()
         self.attr_sno2index = {v: k for k, v in attr_index2sno.items()}
 
     def get_vector(self, item_ids, item2attr_filename):
-        df_goods2attr = pd.read_csv(item2attr_filename)
+        df_goods2attr = read_table(item2attr_filename)
         df_goods2attr = df_goods2attr[df_goods2attr[ITEM_ID].isin(item_ids)]
         df_goods2attr[ATTR_FIELD_INDEX] = df_goods2attr[ATTR_FIELD_ID].map(self.attr_sno2index)
         df_goods2attr = df_goods2attr.loc[df_goods2attr[ATTR_FIELD_INDEX].notnull()]

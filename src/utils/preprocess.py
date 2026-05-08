@@ -14,6 +14,7 @@ from utils.constants import (
     DatasetField,
     RawDataField,
 )
+from utils.df_utils import read_table
 from utils.label_encoder import LabelEncoder, LabelEncoderPrefix
 
 logger = logging.getLogger(__name__)
@@ -126,7 +127,7 @@ def default_load_raw_df_items(
     append_standard_category_text: bool = False,
 ) -> pd.DataFrame:
     def get_category_map(category_filename):
-        df_category = pd.read_csv(category_filename)
+        df_category = read_table(category_filename)
         df_category = df_category[["sno", "catnm", "parent_category__sno"]]
         df_category = df_category.set_index("sno")
         sno2text = df_category["catnm"].astype(str).T.squeeze()
@@ -134,7 +135,7 @@ def default_load_raw_df_items(
         return sno2text, sno2parent
 
     def get_standard_category_map(standard_category_filename):
-        df_standard_category = pd.read_csv(standard_category_filename)
+        df_standard_category = read_table(standard_category_filename)
         df_standard_category = df_standard_category[["sno", "name", "parent_standard_category__sno"]]
         df_standard_category = df_standard_category.set_index("sno")
         sno2text = df_standard_category["name"].astype(str).T.squeeze()
@@ -143,7 +144,7 @@ def default_load_raw_df_items(
 
     category_sno2text, category_sno2parent = get_category_map(category_filename)
     standard_category_sno2text, standard_category_sno2parent = get_standard_category_map(standard_category_filename)
-    df_goods = pd.read_csv(goods_filename, escapechar="\\")
+    df_goods = read_table(goods_filename, escapechar="\\")
     df_goods = df_goods.drop_duplicates(subset=["sno"])
     df_goods = df_goods.dropna()
     if on_voca_items is not None:

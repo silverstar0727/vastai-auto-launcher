@@ -1,5 +1,6 @@
 """기존 reco_common/util/data_utils/df_utils.py 원본 그대로 포팅."""
 import logging
+import os
 from glob import glob
 from typing import Dict, List, Optional
 
@@ -8,6 +9,14 @@ import pandas as pd
 from utils.constants import EVENT_MAP, DatasetField, RawDataField
 
 logger = logging.getLogger(__name__)
+
+
+def read_table(path, **csv_kwargs):
+    """확장자 보고 parquet/csv 자동 분기. 디렉터리는 parquet으로 간주."""
+    p = str(path)
+    if p.endswith(".parquet") or os.path.isdir(p):
+        return pd.read_parquet(p)
+    return pd.read_csv(p, **csv_kwargs)
 
 
 def load_df_user2items(interaction_csv, order_csv, event_map=EVENT_MAP):
@@ -27,7 +36,7 @@ def load_df_user2items(interaction_csv, order_csv, event_map=EVENT_MAP):
 
 
 def _load_order_df(csv_filepath):
-    df = pd.read_csv(csv_filepath)
+    df = read_table(csv_filepath)
     df = df[["order_sno", "goods_sno", "member_sno"]]
     df = df[df["member_sno"].notna()].astype({"member_sno": "int32"})
     df[RawDataField.USER_ID] = df["member_sno"].astype(str).map("m{}".format)
@@ -70,7 +79,7 @@ def load_user_df(csv_filepath, valid_min_age=10, valid_max_age=40, invalid_birth
     def diff_to_age(diff):
         return int(diff / np.timedelta64(365, "D"))
 
-    df = pd.read_csv(csv_filepath)
+    df = read_table(csv_filepath)
     df = df[df["birth_date"].notna()]
 
     df[RawDataField.USER_ID] = df["m_no"].astype(str).map("m{}".format)
