@@ -1,0 +1,39 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# --- 데이터/로그/체크포인트 (런타임에 호스트 마운트로 처리) ---
+data/
+logs/
+output/
+*.ckpt
+*.parquet
+*.npy
+*.pkl
+
+# --- IDE / VCS ---
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# --- 도커 자체 ---
+Dockerfile*
+.dockerignore
+
+# --- wandb 로컬 디렉터리 ---
+wandb/
+
+# --- uv 캐시 ---
+.uv-cache/
+
+# --- 기타 ---
+*.log
+*.swp
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

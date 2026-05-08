@@ -1,0 +1,52 @@
+# Runpod PyTorch base — CUDA 12.8.1 / torch 2.8.0 / Ubuntu 24.04
+FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# 1) OS deps: AWS CLI v2 + git/curl/unzip + tini (signal forwarding)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl unzip ca-certificates git tini && \
+    rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2 (architecture auto-detect)
+RUN ARCH="$(uname -m)" && \
+    case "$ARCH" in \
+        x86_64) URL="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" ;; \
+        aarch64) URL="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" ;; \
+        *) echo "unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL "$URL" -o /tmp/awscli.zip && \
+    unzip -q /tmp/awscli.zip -d /tmp/ && \
+    /tmp/aws/install && \
+    rm -rf /tmp/awscli.zip /tmp/aws
+
+# 2) uv 설치
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# 3) Python 의존성 (lock 강제 → 재현성)
+WORKDIR /workspace
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_LINK_MODE=copy \
+    PATH="/opt/venv/bin:$PATH"
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+# 4) 코드 복사 (자주 바뀌는 부분은 가장 마지막에 둬서 캐시 효율)
+COPY src/ src/
+COPY configs/ configs/
+COPY scripts/ scripts/
+RUN chmod +x scripts/runpod_entrypoint.sh scripts/runpod_download.sh
+
+# 5) 기본 환경변수 (실행 시 -e 로 override)
+ENV MODEL=cbf-reprod \
+    DATE="" \
+    DATA_ROOT=/data \
+    AWS_PROFILE="" \
+    AWS_DEFAULT_REGION=ap-northeast-2 \
+    WANDB_API_KEY="" \
+    WANDB_PROJECT=cbf-exp \
+    PYTHONUNBUFFERED=1
+
+# tini 를 PID 1 으로 두어 SIGINT/SIGTERM 전파 + 좀비 회수
+ENTRYPOINT ["/usr/bin/tini", "--", "scripts/runpod_entrypoint.sh"]

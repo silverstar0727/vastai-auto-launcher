@@ -50,7 +50,7 @@ class RichWandbCLI(RichCLI):
                 "trainer.logger": {
                     "class_path": "cli_modules.rich_wandb.CleanUpWandbLogger",
                     "init_args": {
-                        "project": "cbf-exp",
+                        "project": os.environ.get("WANDB_PROJECT", "cbf-exp"),
                         "save_dir": "logs",
                         # "log_model": "all",
                         "clean": True,
