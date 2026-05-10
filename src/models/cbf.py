@@ -191,19 +191,37 @@ class CBFModel(L.LightningModule):
             pred_scores = pred_scores / self.temperature
             if self.hparams.bias_correction:
                 pred_scores = pred_scores - in_batch_pos_probs.log().unsqueeze(0)
+            self._log_score_stats(pred_scores)
             loss = self._compute_loss(pred_scores, target_scores)
         else:
             inputs, labels = batch
             scores = self.net(inputs)
             scores = scores / self.temperature
+            self._log_score_stats(scores)
 
             loss = self._compute_loss(scores[:, 1:], labels[:, 1:])
         self.loss_acc(loss)
         return loss
 
+    def _log_score_stats(self, scores: torch.Tensor):
+        """Logit (post-temperature) min/max 를 epoch 단위로 집계.
+        overflow / 발산 진단용 — 운영 cbf3 의 'Score 발산 추이' 와 같은 포맷."""
+        with torch.no_grad():
+            self.log("train/score_min", scores.detach().min(),
+                     on_step=False, on_epoch=True, reduce_fx="min")
+            self.log("train/score_max", scores.detach().max(),
+                     on_step=False, on_epoch=True, reduce_fx="max")
+
     def on_train_epoch_end(self):
         avg_loss = self.loss_acc.compute()
         self.log("train/loss", avg_loss)
+        # trainable parameter 의 max abs — weight 폭주 진단
+        with torch.no_grad():
+            weight_max = max(
+                (p.abs().max().item() for p in self.parameters() if p.requires_grad),
+                default=0.0,
+            )
+        self.log("train/weight_max", weight_max)
 
     def validation_step(self, val_batch, batch_idx):
         inputs, batch_pos_labels = val_batch
