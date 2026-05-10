@@ -20,6 +20,20 @@ SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 
 log "MODEL=$MODEL DATE=$DATE DATA_ROOT=$DATA_ROOT"
 
+# ---- 1.5) 이전 run 잔여 정리 (runpod container disk 가 stop/start 사이 영속이라 필요) ----
+# /workspace/logs : lightning + wandb 로컬 dir. 남아있으면 _check_resume 가 죽은 run 의
+#                   config.yaml 찾다 FileNotFoundError 로 학습 진입 자체를 차단함.
+# $DATA_ROOT/output/$MODEL : preprocessed cache, encoder JSON 등.
+# 환경변수 KEEP_LOGS=1 / KEEP_MODEL_PATH=1 로 각각 보존 가능.
+if [ "${KEEP_LOGS:-0}" != "1" ] && [ -d /workspace/logs ]; then
+    log "이전 /workspace/logs 정리 (KEEP_LOGS=1 로 비활성화)"
+    rm -rf /workspace/logs
+fi
+if [ "${KEEP_MODEL_PATH:-0}" != "1" ] && [ -d "$DATA_ROOT/output/$MODEL" ]; then
+    log "이전 $DATA_ROOT/output/$MODEL 정리 (KEEP_MODEL_PATH=1 로 비활성화)"
+    rm -rf "$DATA_ROOT/output/$MODEL"
+fi
+
 mkdir -p "$DATA_ROOT" /workspace/logs
 
 # ---- 2) AWS 인증 확인 ----
