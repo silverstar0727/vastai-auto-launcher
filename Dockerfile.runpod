@@ -3,7 +3,7 @@ FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# 1) OS deps: AWS CLI v2 + git/curl/unzip + tini (signal forwarding)
+# 1) OS deps: AWS CLI v2 + git/curl/unzip + tini
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl unzip ca-certificates git tini && \
     rm -rf /var/lib/apt/lists/*
@@ -24,29 +24,31 @@ RUN ARCH="$(uname -m)" && \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 # 3) Python 의존성 (lock 강제 → 재현성)
-WORKDIR /workspace
+#    /workspace 는 런타임 git clone 대상이라 lock 파일은 별도 dir 에 둠
+WORKDIR /opt/project
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_LINK_MODE=copy \
     PATH="/opt/venv/bin:$PATH"
-
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# 4) 코드 복사 (자주 바뀌는 부분은 가장 마지막에 둬서 캐시 효율)
-COPY src/ src/
-COPY configs/ configs/
-COPY scripts/ scripts/
-RUN chmod +x scripts/runpod_entrypoint.sh scripts/runpod_download.sh
+# 4) Bootstrap 스크립트만 baked-in. 나머지 코드는 런타임에 git clone
+COPY scripts/runpod_bootstrap.sh /usr/local/bin/runpod-bootstrap.sh
+RUN chmod +x /usr/local/bin/runpod-bootstrap.sh
 
-# 5) 기본 환경변수 (실행 시 -e 로 override)
-ENV MODEL=cbf-reprod \
+# 5) 작업 디렉터리 = clone 위치
+WORKDIR /workspace
+
+# 6) 기본 환경변수 (실행 시 -e 로 override)
+ENV REPO_URL=https://github.com/ml-jeongmin-do/runpod-launcher.git \
+    REPO_REF=main \
+    GITHUB_TOKEN="" \
+    MODEL=cbf-reprod \
     DATE="" \
     DATA_ROOT=/data \
-    AWS_PROFILE="" \
     AWS_DEFAULT_REGION=ap-northeast-2 \
     WANDB_API_KEY="" \
     WANDB_PROJECT=cbf-exp \
     PYTHONUNBUFFERED=1
 
-# tini 를 PID 1 으로 두어 SIGINT/SIGTERM 전파 + 좀비 회수
-ENTRYPOINT ["/usr/bin/tini", "--", "scripts/runpod_entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/runpod-bootstrap.sh"]
