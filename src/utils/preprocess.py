@@ -130,16 +130,17 @@ def default_load_raw_df_items(
         df_category = read_table(category_filename)
         df_category = df_category[["sno", "catnm", "parent_category__sno"]]
         df_category = df_category.set_index("sno")
-        sno2text = df_category["catnm"].astype(str).T.squeeze()
-        sno2parent = df_category["parent_category__sno"].T.squeeze()
+        # Series 의 .T 는 no-op 이지만 newer pandas 에서 swapaxes deprecation 경고 trigger
+        sno2text = df_category["catnm"].astype(str)
+        sno2parent = df_category["parent_category__sno"]
         return sno2text, sno2parent
 
     def get_standard_category_map(standard_category_filename):
         df_standard_category = read_table(standard_category_filename)
         df_standard_category = df_standard_category[["sno", "name", "parent_standard_category__sno"]]
         df_standard_category = df_standard_category.set_index("sno")
-        sno2text = df_standard_category["name"].astype(str).T.squeeze()
-        sno2parent = df_standard_category["parent_standard_category__sno"].T.squeeze()
+        sno2text = df_standard_category["name"].astype(str)
+        sno2parent = df_standard_category["parent_standard_category__sno"]
         return sno2text, sno2parent
 
     category_sno2text, category_sno2parent = get_category_map(category_filename)
