@@ -222,6 +222,9 @@ class CBFModel(L.LightningModule):
                 default=0.0,
             )
         self.log("train/weight_max", weight_max)
+        # temperature 추적 (learnable_temperature=True 일 때 epoch 별 변화 확인)
+        self.log("train/temperature", self.temperature.detach())
+        self.log("train/log_temperature", self.log_temperature.detach())
 
     def validation_step(self, val_batch, batch_idx):
         inputs, batch_pos_labels = val_batch
