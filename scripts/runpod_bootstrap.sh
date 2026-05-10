@@ -59,6 +59,21 @@ git reset --hard FETCH_HEAD
 git remote set-url origin "$REPO_URL"   # 토큰 git config 에 안 남도록 복원
 log "현재 commit: $(git rev-parse --short HEAD) ($(git log -1 --format=%s 2>/dev/null | head -c 80))"
 
+# ---- 2.5) 이전 run 의 잔여 산출물 정리 (runpod container disk 가 stop/start 사이 영속이라 필요) ----
+# /workspace/logs : lightning + wandb 로컬 dir. 남아있으면 _check_resume 가 죽은 run 의
+#                   config.yaml 찾다 FileNotFoundError 로 학습 시작 자체를 막음.
+# $DATA_ROOT/output/$MODEL : preprocessed cache, encoder JSON 등. 같은 데이터면 재생성해도
+#                   결과 동일하지만 cache miss 로 setup 시간 늘어남 (보존이 더 나을 수도).
+# 환경변수 KEEP_LOGS=1 / KEEP_MODEL_PATH=1 로 각각 보존 가능.
+if [ "${KEEP_LOGS:-0}" != "1" ] && [ -d /workspace/logs ]; then
+    log "이전 logs/ 정리 (KEEP_LOGS=1 로 비활성화 가능)"
+    rm -rf /workspace/logs
+fi
+if [ "${KEEP_MODEL_PATH:-0}" != "1" ] && [ -n "${MODEL:-}" ] && [ -d "${DATA_ROOT:-/data}/output/$MODEL" ]; then
+    log "이전 ${DATA_ROOT:-/data}/output/$MODEL 정리 (KEEP_MODEL_PATH=1 로 비활성화 가능)"
+    rm -rf "${DATA_ROOT:-/data}/output/$MODEL"
+fi
+
 # ---- 3) (선택) uv sync ----
 if [ "${SKIP_UV_SYNC:-0}" = "1" ]; then
     log "SKIP_UV_SYNC=1 → uv sync 건너뜀"
