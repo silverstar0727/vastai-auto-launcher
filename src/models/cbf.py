@@ -1,3 +1,4 @@
+import math
 from typing import Dict, List, Optional
 
 import torch
@@ -106,6 +107,7 @@ class CBFModel(L.LightningModule):
         top_k: int = 50,
         negative_sampling: bool = True,
         softmax_temperature: float = 1.0,
+        learnable_temperature: bool = False,
         bias_correction: bool = False,
         mean_loss: bool = False,
         num_hidden_layers: int = 1,
@@ -117,11 +119,23 @@ class CBFModel(L.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
+        # learnable temperature: log scale 로 두어 tau>0 보장 + scale 안정.
+        # CLIP 등 contrastive learning 표준 패턴.
+        init_log = math.log(softmax_temperature)
+        if learnable_temperature:
+            self.log_temperature = nn.Parameter(torch.tensor(init_log, dtype=torch.float32))
+        else:
+            self.register_buffer("log_temperature", torch.tensor(init_log, dtype=torch.float32))
+
         # net은 setup()에서 DataModule의 전처리 결과를 읽어 초기화
         self.net = None
         self.accuracy_metric = None
         self.coverage_metric = None
         self.loss_acc = None
+
+    @property
+    def temperature(self) -> torch.Tensor:
+        return self.log_temperature.exp()
 
     def setup(self, stage):
         if self.net is not None:
@@ -174,14 +188,14 @@ class CBFModel(L.LightningModule):
             pred_scores = self.net(inputs, in_batch_pos_items)
             target_scores = create_target_scores(pred_scores, batch_pos_labels, in_batch_pos_items)
 
-            pred_scores = pred_scores / self.hparams.softmax_temperature
+            pred_scores = pred_scores / self.temperature
             if self.hparams.bias_correction:
                 pred_scores = pred_scores - in_batch_pos_probs.log().unsqueeze(0)
             loss = self._compute_loss(pred_scores, target_scores)
         else:
             inputs, labels = batch
             scores = self.net(inputs)
-            scores = scores / self.hparams.softmax_temperature
+            scores = scores / self.temperature
 
             loss = self._compute_loss(scores[:, 1:], labels[:, 1:])
         self.loss_acc(loss)
