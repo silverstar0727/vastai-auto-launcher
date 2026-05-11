@@ -115,4 +115,27 @@ case "$MODEL" in
 esac
 
 log "[5/5] 학습 시작: configs/${MODEL}.yaml"
-exec python src/main.py fit -c "$CONFIG" "${EXTRA_OVERRIDES[@]}" "$@"
+
+# 학습 종료 후 self-terminate 옵션 처리를 위해 exec 대신 그냥 실행
+python src/main.py fit -c "$CONFIG" "${EXTRA_OVERRIDES[@]}" "$@"
+EXIT_CODE=$?
+log "학습 종료 (exit code: $EXIT_CODE)"
+
+# ---- 6) (선택) Pod self-terminate ----
+# TERMINATE_ON_EXIT=1 일 때 runpod API 로 자기 자신 영구 삭제 요청.
+# 필요한 env: RUNPOD_API_KEY (Secret 권장), RUNPOD_POD_ID (runpod 자동 주입)
+if [ "${TERMINATE_ON_EXIT:-0}" = "1" ]; then
+    if [ -z "${RUNPOD_API_KEY:-}" ] || [ -z "${RUNPOD_POD_ID:-}" ]; then
+        log "TERMINATE_ON_EXIT=1 이지만 RUNPOD_API_KEY 또는 RUNPOD_POD_ID 미설정 - 종료 안 함"
+    else
+        log "Pod 자동 삭제 요청 (RUNPOD_POD_ID=$RUNPOD_POD_ID)"
+        curl -sS -X POST https://api.runpod.io/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+            -d "{\"query\":\"mutation { podTerminate(input: { podId: \\\"${RUNPOD_POD_ID}\\\" }) }\"}" \
+            2>&1 | head -5
+        # API 호출 후 컨테이너 정상 exit (위 EXIT_CODE 보존)
+    fi
+fi
+
+exit "$EXIT_CODE"
