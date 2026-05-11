@@ -124,7 +124,7 @@ log "학습 종료 (exit code: $EXIT_CODE)"
 # ---- 6) (선택) Pod self-terminate ----
 # TERMINATE_ON_EXIT=1 일 때 runpod API 로 자기 자신 영구 삭제 요청.
 # 필요한 env: RUNPOD_API_KEY (Secret 권장), RUNPOD_POD_ID (runpod 자동 주입)
-if [ "${TERMINATE_ON_EXIT:-0}" = "1" ]; then
+if [ "${TERMINATE_ON_EXIT:-1}" = "1" ]; then
     if [ -z "${RUNPOD_API_KEY:-}" ] || [ -z "${RUNPOD_POD_ID:-}" ]; then
         log "TERMINATE_ON_EXIT=1 이지만 RUNPOD_API_KEY 또는 RUNPOD_POD_ID 미설정 - 종료 안 함"
     else
