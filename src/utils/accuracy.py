@@ -58,3 +58,32 @@ def _ndcg(hits, answer_count, k):
     idcg = torch.Tensor([weights[: min(int(n), k)].sum() for n in answer_count]).to(dcg.device)
     ndcg = (dcg / idcg).mean()
     return ndcg
+
+
+def hr_mrr_for_ks(batch_rank_items, batch_positive_items, ks=[1, 50]):
+    """HR@k (Hit Rate, top-k 에 정답 하나라도 있으면 1) + MRR (정답 첫 등장 reciprocal rank)."""
+    n_batches = batch_rank_items.shape[0]
+    metrics = {}
+
+    for k in ks:
+        topk = batch_rank_items[:, :k]                                # (N, k)
+        topk_3d = topk.view(n_batches, k, 1)                          # (N, k, 1)
+        pos_3d = batch_positive_items.view(n_batches, 1, -1)          # (N, 1, n_pos)
+        matches = (topk_3d == pos_3d).any(dim=-1)                     # (N, k) bool
+
+        hr = matches.any(dim=-1).float().mean()
+        metrics[f"HR_{k}"] = hr
+
+    # MRR: 가장 큰 k 기준으로 first-hit reciprocal rank
+    k_max = max(ks)
+    topk = batch_rank_items[:, :k_max]
+    topk_3d = topk.view(n_batches, k_max, 1)
+    pos_3d = batch_positive_items.view(n_batches, 1, -1)
+    matches = (topk_3d == pos_3d).any(dim=-1).float()                 # (N, k)
+    positions = torch.arange(1, k_max + 1, device=matches.device).float()
+    # 일치 위치에 reciprocal rank, 외 0
+    rr = matches * (1.0 / positions[None, :])
+    # 각 user 의 best (first hit 가 가장 큰 1/rank)
+    mrr = rr.max(dim=-1).values.mean()
+    metrics[f"MRR_{k_max}"] = mrr
+    return metrics

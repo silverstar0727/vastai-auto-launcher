@@ -10,7 +10,7 @@ from torchmetrics import Metric
 
 from nets.cbf.two_tower import CBFNet
 from optimizers.linear_warmup import LinearWarmupCosineAnnealingLR
-from utils.accuracy import recalls_and_ndcgs_for_ks
+from utils.accuracy import hr_mrr_for_ks, recalls_and_ndcgs_for_ks
 from utils.constants import FeatureField
 
 
@@ -40,6 +40,8 @@ class Accuracy(Metric):
         self.add_state("total", default=torch.tensor(0))
         self.add_state("NDCG", default=torch.tensor(0.0))
         self.add_state("Recall", default=torch.tensor(0.0))
+        self.add_state("HR_1", default=torch.tensor(0.0))
+        self.add_state("MRR", default=torch.tensor(0.0))
         self.top_k = top_k
         self.compute_on_step = False
 
@@ -48,12 +50,17 @@ class Accuracy(Metric):
         metrics = recalls_and_ndcgs_for_ks(batch_rank_items, batch_positive_items, [self.top_k])
         self.NDCG += metrics[f"NDCG_{self.top_k}"]
         self.Recall += metrics[f"Recall_{self.top_k}"]
+        hm = hr_mrr_for_ks(batch_rank_items, batch_positive_items, ks=[1, self.top_k])
+        self.HR_1 += hm["HR_1"]
+        self.MRR += hm[f"MRR_{self.top_k}"]
         self.total += 1
 
     def compute(self):
         scores = {
             f"NDCG_{self.top_k}": self.NDCG / self.total,
             f"Recall_{self.top_k}": self.Recall / self.total,
+            "HR_1": self.HR_1 / self.total,
+            f"MRR_{self.top_k}": self.MRR / self.total,
         }
         self.cover_items = set()
         self.reset()
@@ -81,6 +88,54 @@ class Coverage(Metric):
         self.cover_items = set()
         self.reset()
         return scores
+
+
+class TailRecall(Metric):
+    """item index > head_threshold 인 tail 아이템 중 top-K 에 회수된 비율.
+    item index 는 on_voca_items 가 frequency 내림차순 정렬돼 있어 index 큰 게 tail."""
+
+    def __init__(self, top_k=50, head_threshold=0, dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.top_k = top_k
+        self.head_threshold = head_threshold
+        self.add_state("hits", default=torch.tensor(0.0))
+        self.add_state("total_tail_pos", default=torch.tensor(0.0))
+
+    def update(self, batch_scores: torch.Tensor, batch_positive_items: torch.Tensor):
+        batch_rank_items = batch_scores.argsort(dim=1, descending=True)[:, : self.top_k]   # (B, K)
+        rank3d = batch_rank_items.unsqueeze(-1)                                            # (B, K, 1)
+        pos3d = batch_positive_items.unsqueeze(1)                                          # (B, 1, P)
+        matches = (rank3d == pos3d).any(dim=1)                                             # (B, P) — 각 positive 가 top-K 안에 있는지
+        is_tail_pos = (batch_positive_items > self.head_threshold) & (batch_positive_items > 0)
+        self.hits += (matches & is_tail_pos).sum().float()
+        self.total_tail_pos += is_tail_pos.sum().float()
+
+    def compute(self):
+        recall = self.hits / self.total_tail_pos.clamp(min=1)
+        self.reset()
+        return {f"TailRecall_{self.top_k}": recall}
+
+
+class TailExposure(Metric):
+    """평균 top-K 추천 중 tail 아이템 비율 (user 간 평균). diversity proxy."""
+
+    def __init__(self, top_k=50, head_threshold=0, dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.top_k = top_k
+        self.head_threshold = head_threshold
+        self.add_state("ratio_sum", default=torch.tensor(0.0))
+        self.add_state("total", default=torch.tensor(0))
+
+    def update(self, batch_scores: torch.Tensor):
+        batch_rank_items = batch_scores.argsort(dim=1, descending=True)[:, : self.top_k]
+        is_tail = (batch_rank_items > self.head_threshold).float()
+        self.ratio_sum += is_tail.mean(dim=1).mean()
+        self.total += 1
+
+    def compute(self):
+        ratio = self.ratio_sum / self.total.clamp(min=1)
+        self.reset()
+        return {f"TailExposure_{self.top_k}": ratio}
 
 
 # --- Helper function ---
@@ -159,6 +214,11 @@ class CBFModel(L.LightningModule):
         self.accuracy_metric = Accuracy(self.hparams.top_k)
         self.std_accuracy_metric = Accuracy(self.hparams.top_k)  # 논문 표준 메트릭
         self.coverage_metric = Coverage(dm.num_items, self.hparams.top_k)
+        # head/tail 기준: item index <= head_threshold 가 head (상위 20%)
+        # on_voca_items 가 frequency desc 정렬이라 index 작을수록 인기.
+        head_threshold = max(1, int(0.2 * dm.num_items))
+        self.tail_recall_metric = TailRecall(self.hparams.top_k, head_threshold=head_threshold)
+        self.tail_exposure_metric = TailExposure(self.hparams.top_k, head_threshold=head_threshold)
         self.loss_acc = LossAccumulator()
 
     def _compute_loss(self, scores, labels):
@@ -258,6 +318,10 @@ class CBFModel(L.LightningModule):
         click_items = inputs[FeatureField.CLICK_ITEMS]
         std_scores.scatter_(1, click_items, float("-inf"))
         self.std_accuracy_metric.update(std_scores, batch_pos_labels)
+        # 보조 진단 메트릭 (모두 std 기준 = full vocab + history removal)
+        self.coverage_metric.update(std_scores)
+        self.tail_recall_metric.update(std_scores, batch_pos_labels)
+        self.tail_exposure_metric.update(std_scores)
 
     def on_validation_epoch_end(self):
         dict_ = self.accuracy_metric.compute()
@@ -267,6 +331,14 @@ class CBFModel(L.LightningModule):
         std_dict = self.std_accuracy_metric.compute()
         for k, v in std_dict.items():
             self.log(f"val/std_{k}", v)
+
+        # 보조 진단 메트릭
+        for k, v in self.coverage_metric.compute().items():
+            self.log(f"val/{k}", v)
+        for k, v in self.tail_recall_metric.compute().items():
+            self.log(f"val/{k}", v)
+        for k, v in self.tail_exposure_metric.compute().items():
+            self.log(f"val/{k}", v)
 
     def test_step(self, batch, batch_idx):
         return self.validation_step(batch, batch_idx)
