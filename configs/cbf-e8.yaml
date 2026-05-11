@@ -6,7 +6,7 @@ seed_everything: 42
 trainer:
   accelerator: auto
   precision: bf16-mixed
-  max_epochs: 20
+  max_epochs: 30
   deterministic: true
   num_sanity_val_steps: 0
   enable_progress_bar: true
