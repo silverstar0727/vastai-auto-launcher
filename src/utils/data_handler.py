@@ -115,7 +115,12 @@ def split_data_by_users(
             df_user2items_per_user = df_user2items_per_user[-max_seq_per_user:]
 
         n_samples = _get_num_splits(df_user2items_per_user, seq_len)
-        batch_dfs = np.array_split(df_user2items_per_user, n_samples)
+        # np.array_split(DataFrame) 은 내부에서 .swapaxes 호출해 FutureWarning 폭증.
+        # 인덱스 array 에만 array_split 적용해 동일 동작 + 경고 회피.
+        batch_dfs = [
+            df_user2items_per_user.iloc[idx]
+            for idx in np.array_split(np.arange(len(df_user2items_per_user)), n_samples)
+        ]
 
         for df in batch_dfs:
             df = df.reset_index(drop=True)
