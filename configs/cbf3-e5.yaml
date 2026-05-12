@@ -18,16 +18,10 @@ trainer:
   deterministic: true
   num_sanity_val_steps: 0
   enable_progress_bar: true
-  callbacks:
-    - class_path: SaveItemEmbedCallback
-      init_args:
-        model_path: ${data.init_args.model_path}
-        category_file: ${data.init_args.category_filename}
-        standard_category_file: ${data.init_args.standard_category_filename}
-        goods_file: ${data.init_args.goods_filename}
-        use_item_emb_in_item_tower: ${data.init_args.use_item_emb_in_item_tower}
-        inhouse_text_path: ${data.init_args.pretrained_root}
-        expand_oov: false
+  # NOTE: SaveItemEmbedCallback 은 cbf3.yaml (production alias) 에만 둠.
+  # 이유: ModelCheckpoint 의 dirpath 자동 derive (/workspace/logs/...) 와
+  # 콜백의 model_path 보간 (yaml 호스트 경로) 이 어긋나 FileNotFoundError 발생.
+  # ablation 실험은 wandb 메트릭만 보면 충분하므로 콜백 제외.
 
 model:
   class_path: CBFModel
