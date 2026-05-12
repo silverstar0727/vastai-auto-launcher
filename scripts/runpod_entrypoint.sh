@@ -8,6 +8,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log()  { echo "[entrypoint] $*"; }
 fail() { echo "[entrypoint] ERROR: $*" >&2; exit 2; }
 
+# ---- 0) Pod 자동 삭제 trap — set -e / SIGKILL / 정상 종료 어떤 경로든 한 번 실행 ----
+# 의도: 학습이 비정상 종료해도 K8s default `restartPolicy: Always` 에 의한 무한 재시작 루프 차단.
+# `python ... ` 이 OOM-kill 되면 set -e 가 즉시 shell 을 죽이므로 명시적 EXIT_CODE 캡처
+# 블록이 도달 못 함. trap EXIT 은 이 경로에서도 발동되므로 안전.
+cleanup_and_terminate() {
+    local code=$?
+    log "exit (code=$code) — TERMINATE_ON_EXIT 처리"
+    if [ "${TERMINATE_ON_EXIT:-1}" = "1" ]; then
+        if [ -z "${RUNPOD_API_KEY:-}" ] || [ -z "${RUNPOD_POD_ID:-}" ]; then
+            log "TERMINATE_ON_EXIT=1 이지만 RUNPOD_API_KEY 또는 RUNPOD_POD_ID 미설정 - 종료 안 함"
+        else
+            log "Pod 자동 삭제 요청 (RUNPOD_POD_ID=$RUNPOD_POD_ID, exit_code=$code)"
+            curl -sS -X POST https://api.runpod.io/graphql \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+                -d "{\"query\":\"mutation { podTerminate(input: { podId: \\\"${RUNPOD_POD_ID}\\\" }) }\"}" \
+                2>&1 | head -5 || true
+        fi
+    else
+        log "TERMINATE_ON_EXIT=0 — pod 종료 안 함 (수동 stop 필요)"
+    fi
+}
+trap cleanup_and_terminate EXIT
+
 # ---- 1) 환경변수 검증 ----
 MODEL="${MODEL:-cbf-reprod}"
 DATE="${DATE:-}"
@@ -20,11 +44,20 @@ SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 
 log "MODEL=$MODEL DATE=$DATE DATA_ROOT=$DATA_ROOT"
 
+# ---- 1.1) GPU 핀 (멀티-GPU pod 내부에서 1개씩 띄울 때 사용) ----
+# GPU_ID=0..7 이 지정되면 CUDA_VISIBLE_DEVICES 로 마스킹.
+# Lightning 은 logical GPU 0 한 개만 보이므로 yaml 의 trainer.devices 변경 불필요.
+if [ -n "${GPU_ID:-}" ]; then
+    export CUDA_VISIBLE_DEVICES="$GPU_ID"
+    log "GPU: physical GPU $GPU_ID 만 사용 (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"
+fi
+
 # ---- 1.5) 이전 run 잔여 정리 (runpod container disk 가 stop/start 사이 영속이라 필요) ----
 # /workspace/logs : lightning + wandb 로컬 dir. 남아있으면 _check_resume 가 죽은 run 의
 #                   config.yaml 찾다 FileNotFoundError 로 학습 진입 자체를 차단함.
 # $DATA_ROOT/output/$MODEL : preprocessed cache, encoder JSON 등.
 # 환경변수 KEEP_LOGS=1 / KEEP_MODEL_PATH=1 로 각각 보존 가능.
+# 멀티-GPU pod 에서 동시 실행 시: 다른 run 의 wandb local cache 가 wipe 되지 않게 둘 다 1 권장.
 if [ "${KEEP_LOGS:-0}" != "1" ] && [ -d /workspace/logs ]; then
     log "이전 /workspace/logs 정리 (KEEP_LOGS=1 로 비활성화)"
     rm -rf /workspace/logs
@@ -116,26 +149,7 @@ esac
 
 log "[5/5] 학습 시작: configs/${MODEL}.yaml"
 
-# 학습 종료 후 self-terminate 옵션 처리를 위해 exec 대신 그냥 실행
+# 학습 명령. set -e 하에서 python 이 non-zero 로 죽어도 trap EXIT 이 발동돼
+# Pod self-terminate 가 호출되므로 K8s 재시작 루프에 빠지지 않는다.
 python src/main.py fit -c "$CONFIG" "${EXTRA_OVERRIDES[@]}" "$@"
-EXIT_CODE=$?
-log "학습 종료 (exit code: $EXIT_CODE)"
-
-# ---- 6) (선택) Pod self-terminate ----
-# TERMINATE_ON_EXIT=1 일 때 runpod API 로 자기 자신 영구 삭제 요청.
-# 필요한 env: RUNPOD_API_KEY (Secret 권장), RUNPOD_POD_ID (runpod 자동 주입)
-if [ "${TERMINATE_ON_EXIT:-1}" = "1" ]; then
-    if [ -z "${RUNPOD_API_KEY:-}" ] || [ -z "${RUNPOD_POD_ID:-}" ]; then
-        log "TERMINATE_ON_EXIT=1 이지만 RUNPOD_API_KEY 또는 RUNPOD_POD_ID 미설정 - 종료 안 함"
-    else
-        log "Pod 자동 삭제 요청 (RUNPOD_POD_ID=$RUNPOD_POD_ID)"
-        curl -sS -X POST https://api.runpod.io/graphql \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
-            -d "{\"query\":\"mutation { podTerminate(input: { podId: \\\"${RUNPOD_POD_ID}\\\" }) }\"}" \
-            2>&1 | head -5
-        # API 호출 후 컨테이너 정상 exit (위 EXIT_CODE 보존)
-    fi
-fi
-
-exit "$EXIT_CODE"
+log "학습 종료 (exit code: 0)"
