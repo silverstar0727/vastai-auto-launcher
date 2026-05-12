@@ -1,0 +1,103 @@
+# cbf3-e7 — cbf3 base 위에서 ablation
+# Base (모든 cbf3-eN 공통):
+#   - max_items=180,000, item_vocabulary_size=180,000 (vocab=풀)
+#   - item_embed_size=512, item_dropout_prob=0.0
+#   - price_group_embed_size=0, use_attr=true
+#   - batch_size=1024, max_epochs=30 (cbf-eN 매트릭스와 통일)
+# 이 파일에서의 override 는 manifest 의 § "실험 매트릭스 (cbf3 시리즈)" 참조.
+
+name: cbf3-e7
+version: v1
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: bf16-mixed
+  max_epochs: 30
+  deterministic: true
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  callbacks:
+    - class_path: SaveItemEmbedCallback
+      init_args:
+        model_path: ${data.init_args.model_path}
+        category_file: ${data.init_args.category_filename}
+        standard_category_file: ${data.init_args.standard_category_filename}
+        goods_file: ${data.init_args.goods_filename}
+        use_item_emb_in_item_tower: ${data.init_args.use_item_emb_in_item_tower}
+        inhouse_text_path: ${data.init_args.pretrained_root}
+        expand_oov: false
+
+model:
+  class_path: CBFModel
+  init_args:
+    top_k: 50
+    negative_sampling: false
+    softmax_temperature: 0.05
+    learnable_temperature: false
+    bias_correction: false
+    mean_loss: true
+    num_hidden_layers: 1
+    last_hidden_units: 256
+    item_dropout_prob: 0.0
+    normalize_outputs: true
+    optimizer_params:
+      optimizer: adam
+      lr: 0.001
+      weight_decay: 0.0
+      lr_scheduler: null
+
+data:
+  class_path: CBFDataModule
+  init_args:
+    raw_dataset_root: /home/jeongmindo/projects/ably/data/bert/interaction
+    pretrained_root: /home/jeongmindo/projects/ably/data/pretrained_text
+    sql_dataset_root: /home/jeongmindo/projects/ably/data/sql
+    model_path: /home/jeongmindo/projects/ably/data/output/cbf3-e7
+    goods_filename: /home/jeongmindo/projects/ably/data/sql/goods.parquet
+    category_filename: /home/jeongmindo/projects/ably/data/sql/category.parquet
+    standard_category_filename: /home/jeongmindo/projects/ably/data/sql/standard_category.parquet
+    user_filename: /home/jeongmindo/projects/ably/data/sql/member.parquet
+    order_filename: /home/jeongmindo/projects/ably/data/sql/order.parquet
+
+    min_actions_per_user: 50
+    max_items: 180000
+    batch_size: 1024
+    test_batch_size: 1024
+    max_len: 200
+    num_workers: 0
+    drop_last_batch: true
+
+    item_embed_size: 512
+    item_vocabulary_size: 180000
+    use_age_info: true
+    use_in_house_text_embed: true
+    use_item_emb_in_item_tower: true
+    use_attr: true
+    attr_meta_filename: /home/jeongmindo/projects/ably/data/sql/goods_attribute_field_values.parquet
+    attr_filename: /home/jeongmindo/projects/ably/data/sql/goods_attribute_values.parquet
+    market_embed_size: 128
+    category_embed_size: 128
+    price_group_embed_size: 0
+
+    negative_sampling: false
+    bias_correction: false
+
+    max_test_samples: 200000
+    num_test_samples_per_user: 10
+    dataloader_random_seed: 0.0
+    save_preprocessed_data: false
+
+early_stopping:
+  monitor: val/NDCG_50
+  patience: 20
+  mode: max
+
+model_ckpt:
+  monitor: val/NDCG_50
+  mode: max
+  filename: "best_acc_model"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1

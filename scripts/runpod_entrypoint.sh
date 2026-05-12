@@ -72,7 +72,7 @@ fi
 # 모델별로 키가 다르므로 cbf 계열만 처리. 다른 모델은 yaml 직접 수정 또는 "$@" 로 override.
 EXTRA_OVERRIDES=()
 case "$MODEL" in
-    cbf|cbf-reprod|cbf-cosine-warmup-bs512|cbf-e[0-9]*)
+    cbf|cbf-reprod|cbf-cosine-warmup-bs512|cbf-e[0-9]*|cbf3|cbf3-e[0-9]*)
         EXTRA_OVERRIDES=(
             "--data.init_args.raw_dataset_root=$DATA_ROOT/bert/interaction"
             "--data.init_args.pretrained_root=$DATA_ROOT/pretrained_text"

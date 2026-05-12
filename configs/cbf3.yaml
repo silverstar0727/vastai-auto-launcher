@@ -1,0 +1,118 @@
+# cbf3 baseline — inhouse_kube/src/apps/cbf3/pipeline_config.py 와 옵션을 1:1 매칭
+# 운영 cbf3 endpoint 의 학습 설정을 reco-lightning 위에서 거의 유사하게 재현하는 것이 목적이다.
+#
+# cbf3 의 핵심 특징
+#   1) Full Softmax (negative_sampling=False) — vocab 이 좁아서 in-batch 샘플링 없이도 학습 가능
+#   2) vocab = max_items = 180,000 — 풀과 임베딩 테이블 크기를 정확히 일치 (padding fallback 없음)
+#   3) item_embed_size = 512 — 좁은 vocab 에 per-item capacity 를 키움
+#   4) expand_oov = False — 학습 vocab 밖 신상품 임베딩은 만들지 않음 (좁은 풀 reranker)
+#   5) item_dropout_prob = 0.0 — cbf/cbf-4910 은 0.15 로 override 하지만 cbf3 는 default(=0.0) 그대로
+#   6) price_group_embed_size = 0 — 좁은 풀에서 가격 분위 신호 미사용
+
+name: cbf3
+version: v1
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: 16-mixed
+  max_epochs: 20            # --cbf_num_epochs 20
+  deterministic: true
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  callbacks:
+    # cbf3 는 학습 완료 후 item_embed.npy 를 저장하지만 OOV 신상품 확장을 하지 않는다.
+    # 경로는 OmegaConf 보간으로 data.init_args 의 동일 값을 참조 → runpod entrypoint 에서
+    # `--data.init_args.model_path=$DATA_ROOT/output/cbf3` 등으로 override 하면 자동 따라온다.
+    - class_path: SaveItemEmbedCallback
+      init_args:
+        model_path: ${data.init_args.model_path}
+        category_file: ${data.init_args.category_filename}
+        standard_category_file: ${data.init_args.standard_category_filename}
+        goods_file: ${data.init_args.goods_filename}
+        use_item_emb_in_item_tower: ${data.init_args.use_item_emb_in_item_tower}
+        inhouse_text_path: ${data.init_args.pretrained_root}
+        expand_oov: false   # --cbf_expand_oov False
+
+model:
+  class_path: CBFModel
+  init_args:
+    top_k: 50
+    negative_sampling: false   # --cbf_negative_sampling False (Full Softmax)
+    softmax_temperature: 1.0   # CbfConfig default (cbf3 override 없음)
+    learnable_temperature: false
+    bias_correction: false     # CbfConfig default
+    mean_loss: false           # ably-reco 의 -mean(sum(log_softmax * targets, -1)) 식과 동치
+    num_hidden_layers: 1       # CbfConfig.hidden_layers default
+    last_hidden_units: 256     # CbfConfig.hidden_units default
+    item_dropout_prob: 0.0     # ⚠️ cbf3 는 0.15 override 없음, default 그대로
+    normalize_outputs: false   # CbfConfig default
+    optimizer_params:
+      optimizer: adam          # CbfConfig default
+      lr: 0.001
+      weight_decay: 0.0
+      lr_scheduler: null       # CbfConfig default — scheduler 없음
+
+data:
+  class_path: CBFDataModule
+  init_args:
+    raw_dataset_root: /home/jeongmindo/projects/ably/data/bert/interaction
+    pretrained_root: /home/jeongmindo/projects/ably/data/pretrained_text
+    sql_dataset_root: /home/jeongmindo/projects/ably/data/sql
+    model_path: /home/jeongmindo/projects/ably/data/output/cbf3
+    goods_filename: /home/jeongmindo/projects/ably/data/sql/goods.parquet
+    category_filename: /home/jeongmindo/projects/ably/data/sql/category.parquet
+    standard_category_filename: /home/jeongmindo/projects/ably/data/sql/standard_category.parquet
+    user_filename: /home/jeongmindo/projects/ably/data/sql/member.parquet
+    order_filename: /home/jeongmindo/projects/ably/data/sql/order.parquet
+
+    # --- 필터링 / 풀 정의 ---
+    min_actions_per_user: 50   # CbfConfig default
+    max_items: 180000          # --cbf_max_items 180000  (vocabulary_size 와 동일 → padding fallback 없음)
+
+    # --- 배치 ---
+    batch_size: 1024           # --cbf_batch_size 1024
+    test_batch_size: 1024
+    max_len: 200               # CbfConfig default
+    num_workers: 0
+    drop_last_batch: true
+
+    # --- 피처 ---
+    item_embed_size: 512       # --cbf_item_embed_size 512  (cbf default 256 대비 키움)
+    item_vocabulary_size: 180000   # --cbf_item_vocabulary_size 180000
+    use_age_info: true         # CbfConfig default
+    use_in_house_text_embed: true  # CbfConfig default
+    use_item_emb_in_item_tower: true   # --cbf_use_item_emb_in_item_tower True
+    use_attr: true             # --cbf_use_attr True
+    attr_meta_filename: /home/jeongmindo/projects/ably/data/sql/goods_attribute_field_values.parquet
+    attr_filename: /home/jeongmindo/projects/ably/data/sql/goods_attribute_values.parquet
+    market_embed_size: 128     # CbfConfig default
+    category_embed_size: 128   # CbfConfig default
+    price_group_embed_size: 0  # --cbf_price_group_embed_size 0
+
+    # --- 학습 objective ---
+    negative_sampling: false   # --cbf_negative_sampling False  (model 과 동일)
+    bias_correction: false
+
+    # --- 평가 분할 ---
+    max_test_samples: 200000   # CbfConfig default
+    num_test_samples_per_user: 10  # CbfConfig default
+
+    # --- 시드 ---
+    dataloader_random_seed: 0.0    # ably-reco 와 동일 (RNG seed 0)
+
+    save_preprocessed_data: false
+
+early_stopping:
+  monitor: val/NDCG_50
+  patience: 20
+  mode: max
+
+model_ckpt:
+  monitor: val/NDCG_50           # --cbf_best_metric NDCG_50
+  mode: max
+  filename: "best_acc_model"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1

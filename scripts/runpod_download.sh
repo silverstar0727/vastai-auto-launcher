@@ -41,8 +41,9 @@ download_sql_parquets() {
 
 # ---- 모델별 분기 ----
 case "$MODEL" in
-    cbf-reprod|cbf-e[0-9]*)
-        # cbf-reprod 및 운영 align 실험들 (cbf-e0 ~ cbf-e5 ...) 모두 use_attr=True
+    cbf-reprod|cbf-e[0-9]*|cbf3|cbf3-e[0-9]*)
+        # cbf-reprod 및 운영 align 실험들 (cbf-e0 ~ cbf-e5 ...), cbf3 baseline + cbf3-e* 실험군
+        # 전부 use_attr=True. 동일한 personalize/inhouse/<date>/ 인터랙션 + reco_raw_parquet 7종(+attr) 사용.
         download_pretrained
         download_interaction_to "$DATA/bert/interaction"
         download_sql_parquets "yes"
