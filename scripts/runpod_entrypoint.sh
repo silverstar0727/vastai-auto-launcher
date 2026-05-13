@@ -58,9 +58,15 @@ fi
 # $DATA_ROOT/output/$MODEL : preprocessed cache, encoder JSON 등.
 # 환경변수 KEEP_LOGS=1 / KEEP_MODEL_PATH=1 로 각각 보존 가능.
 # 멀티-GPU pod 에서 동시 실행 시: 다른 run 의 wandb local cache 가 wipe 되지 않게 둘 다 1 권장.
+# 단 KEEP_LOGS=1 일 때도 **이 모델의 stale dir** 은 제거해야 Lightning 의 _check_resume 가
+# 죽은 run 의 incomplete config.yaml 찾다 FileNotFoundError 로 학습 차단하는 걸 막을 수 있다.
+# (KEEP_LOGS=0 = 전부 wipe, KEEP_LOGS=1 = 본 MODEL 의 stale dir 만 wipe)
 if [ "${KEEP_LOGS:-0}" != "1" ] && [ -d /workspace/logs ]; then
     log "이전 /workspace/logs 정리 (KEEP_LOGS=1 로 비활성화)"
     rm -rf /workspace/logs
+elif [ -d "/workspace/logs/$MODEL" ]; then
+    log "이전 /workspace/logs/$MODEL stale dir 정리 (다른 MODEL 의 logs 는 보존)"
+    rm -rf "/workspace/logs/$MODEL"
 fi
 if [ "${KEEP_MODEL_PATH:-0}" != "1" ] && [ -d "$DATA_ROOT/output/$MODEL" ]; then
     log "이전 $DATA_ROOT/output/$MODEL 정리 (KEEP_MODEL_PATH=1 로 비활성화)"
