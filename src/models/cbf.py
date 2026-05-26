@@ -163,6 +163,11 @@ class CBFModel(L.LightningModule):
         negative_sampling: bool = True,
         softmax_temperature: float = 1.0,
         learnable_temperature: bool = False,
+        # bounded learnable temperature — opt-in. False 면 기존 unbounded 동작 유지.
+        # True 면 τ ∈ (temperature_min, temperature_max) 범위 안에서 sigmoid-reparametrize.
+        bounded_temperature: bool = False,
+        temperature_min: float = 0.01,
+        temperature_max: float = 1.0,
         bias_correction: bool = False,
         mean_loss: bool = False,
         num_hidden_layers: int = 1,
@@ -174,13 +179,35 @@ class CBFModel(L.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        # learnable temperature: log scale 로 두어 tau>0 보장 + scale 안정.
-        # CLIP 등 contrastive learning 표준 패턴.
+        # ---- temperature 파라미터 초기화 ----
+        # 3 가지 경로:
+        #   1) learnable=False:                fixed τ, buffer 에 log τ 저장
+        #   2) learnable=True, bounded=False:  unbounded — log_temperature 를 nn.Parameter 로 학습 (기존)
+        #   3) learnable=True, bounded=True:   sigmoid reparametrize — τ ∈ (temp_min, temp_max) 강제
         init_log = math.log(softmax_temperature)
-        if learnable_temperature:
+        if not learnable_temperature:
+            self.register_buffer("log_temperature", torch.tensor(init_log, dtype=torch.float32))
+        elif not bounded_temperature:
+            # 경로 2: 기존 동작 (CLIP 표준 unbounded)
             self.log_temperature = nn.Parameter(torch.tensor(init_log, dtype=torch.float32))
         else:
-            self.register_buffer("log_temperature", torch.tensor(init_log, dtype=torch.float32))
+            # 경로 3: bounded sigmoid reparametrize
+            # _raw ∈ ℝ → sigmoid → 선형보간(log 공간) → exp → τ ∈ (temp_min, temp_max).
+            # 경계에서도 gradient 가 0 이 아니라 점근만 하므로 clamp 의 dead-zone 문제 없음.
+            if not (temperature_min < softmax_temperature < temperature_max):
+                raise ValueError(
+                    f"softmax_temperature={softmax_temperature} 가 "
+                    f"({temperature_min}, {temperature_max}) 범위 밖. "
+                    "bounded_temperature=True 일 때 init 이 bound 안에 있어야 함."
+                )
+            self._log_temp_min = math.log(temperature_min)
+            self._log_temp_max = math.log(temperature_max)
+            # 초기 _raw 역산: init τ 가 forward 매핑의 결과가 되도록 logit 계산
+            p = (init_log - self._log_temp_min) / (self._log_temp_max - self._log_temp_min)
+            eps = 1e-3
+            p = min(max(p, eps), 1 - eps)
+            raw = math.log(p / (1 - p))
+            self._raw_temperature = nn.Parameter(torch.tensor(raw, dtype=torch.float32))
 
         # net은 setup()에서 DataModule의 전처리 결과를 읽어 초기화
         self.net = None
@@ -190,6 +217,11 @@ class CBFModel(L.LightningModule):
 
     @property
     def temperature(self) -> torch.Tensor:
+        # bounded path 일 땐 _raw → sigmoid → 선형보간 → exp 로 계산
+        if self.hparams.learnable_temperature and self.hparams.bounded_temperature:
+            log_t = self._log_temp_min + (self._log_temp_max - self._log_temp_min) * torch.sigmoid(self._raw_temperature)
+            return log_t.exp()
+        # 기존 경로 (fixed 또는 unbounded learnable)
         return self.log_temperature.exp()
 
     def setup(self, stage):
@@ -284,7 +316,11 @@ class CBFModel(L.LightningModule):
         self.log("train/weight_max", weight_max)
         # temperature 추적 (learnable_temperature=True 일 때 epoch 별 변화 확인)
         self.log("train/temperature", self.temperature.detach())
-        self.log("train/log_temperature", self.log_temperature.detach())
+        # bounded path 면 log_temperature 가 없으므로 _raw 값 logging.
+        if self.hparams.learnable_temperature and self.hparams.bounded_temperature:
+            self.log("train/raw_temperature", self._raw_temperature.detach())
+        else:
+            self.log("train/log_temperature", self.log_temperature.detach())
 
     def validation_step(self, val_batch, batch_idx):
         inputs, batch_pos_labels = val_batch
