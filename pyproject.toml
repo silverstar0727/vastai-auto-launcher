@@ -23,4 +23,6 @@ dependencies = [
     "sentence-transformers>=2.2.0",
     "pyarrow>=21.0.0",
     "sentencepiece>=0.2.1",
+    "trino[external-authentication-token-cache]>=0.337.0",
+    "keyrings-alt>=5.0.2",
 ]
