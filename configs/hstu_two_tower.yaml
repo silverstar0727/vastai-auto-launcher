@@ -1,5 +1,6 @@
-# HSTU two-tower — Two-tower path 의 핵심 학습 config
-# Dependency: meta/active_items.parquet + interactions/{train,val,test}/ (Tasks #2, #3 완료됨)
+# HSTU two-tower — PoC v2_full 본격 학습
+# 데이터: 5.4M active users, 1.4M active items, 4-event multi-behavior funnel.
+# 추정 평균 user seq ~318 (heavy tail) → max_seq_len 200 + augment 8× 활용.
 
 name: hstu_two_tower
 version: v1
@@ -14,20 +15,25 @@ trainer:
   num_sanity_val_steps: 0
   enable_progress_bar: true
   log_every_n_steps: 100
+  gradient_clip_val: 1.0          # transformer 안정성
 
 model:
   class_path: HSTUTwoTowerModel
   init_args:
-    dim: 256
-    num_layers: 4
-    num_heads: 8
-    ff_dim: 1024
+    # capacity — A6000 48GB 친화적 (item embed 1.4M × 384 ≈ 0.54B params)
+    dim: 384
+    num_layers: 6                  # 4 → 6
+    num_heads: 6                   # 384/6 = 64 head_dim
+    ff_dim: 1536
     num_interests: 4
     attention_dim: 64
-    item_content_dim: 0          # v1 — 사전학습 임베딩 join 은 v2 (HSTU 자체 학습 임베딩만)
-    dropout: 0.1
-    lr: 0.001
-    weight_decay: 0.0
+    item_content_dim: 0            # v1: id-only embedding (사전학습 text inject 는 v2)
+    dropout: 0.2                   # regularization
+    # optim + schedule
+    lr: 0.002
+    weight_decay: 0.01
+    warmup_epochs: 3
+    eta_min: 0.00001
     eval_ks: [10, 50]
 
 data:
@@ -36,14 +42,15 @@ data:
     base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
     max_seq_len: 200
     min_seq_len: 5
-    batch_size: 256
-    eval_batch_size: 128
+    max_user_history: 1000        # heavy tail user 까지 커버
+    augment_factor: 8             # user당 8 sub-sequence — 8× data
+    batch_size: 384
+    eval_batch_size: 256
     num_workers: 4
-    # PoC 1차: 전체 98 train 일 중 최근 14일만 사용 (debug-friendly)
-    # 안정화 후 전체로 확장
-    train_days: 14
+    train_days: 30                # 14 → 30
     val_days: 7
     test_days: 16
+    seed: 42
 
 early_stopping:
   monitor: val/Recall@10

@@ -93,14 +93,17 @@ class TIGERLiteDataModule(L.LightningDataModule):
         self,
         base_dir: str = "/home/jeongmindo/projects/ably/data/reco_experiments/v2_full",
         codebook_sizes: tuple = (2048, 1024, 512),
-        max_history_items: int = 50,         # T_enc = 50 × 3 = 150
+        max_history_items: int = 50,
         min_history_items: int = 5,
+        max_user_history: int = 500,        # augment 원본 시퀀스 길이
+        augment_factor: int = 8,
         batch_size: int = 128,
         eval_batch_size: int = 64,
         num_workers: int = 4,
-        train_days: int = 14,
+        train_days: int = 30,
         val_days: int = 7,
         test_days: int = 16,
+        seed: int = 42,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -126,10 +129,10 @@ class TIGERLiteDataModule(L.LightningDataModule):
 
         train_files = sorted((self.base / "interactions" / "train").glob("*.parquet"))[-self.hparams.train_days:]
         val_files = sorted((self.base / "interactions" / "val").glob("*.parquet"))[-self.hparams.val_days:]
-        self._train_samples = self._build_samples(train_files)
-        self._val_samples = self._build_samples(val_files)
+        self._train_samples = self._build_samples(train_files, augment=True)
+        self._val_samples = self._build_samples(val_files, augment=False)
 
-    def _build_samples(self, files: List[Path]) -> List[Dict[str, np.ndarray]]:
+    def _build_samples(self, files: List[Path], augment: bool = False) -> List[Dict[str, np.ndarray]]:
         rows = []
         for fp in files:
             df = pd.read_parquet(fp, columns=["user_code", "goods_sno", "event", "ts"])
@@ -143,53 +146,60 @@ class TIGERLiteDataModule(L.LightningDataModule):
         L = self.store.L
         max_T_enc = self.hparams.max_history_items * L
         samples: List[Dict[str, np.ndarray]] = []
+        rng = np.random.default_rng(self.hparams.seed)
 
         for uc, g in all_df.groupby("user_code", sort=False):
-            snos = g["goods_sno"].tolist()
-            evs = g["event"].tolist()
+            snos = g["goods_sno"].tolist()[-self.hparams.max_user_history:]
+            evs = g["event"].tolist()[-self.hparams.max_user_history:]
             if len(snos) < self.hparams.min_history_items + 1:
                 continue
-            target_sno = snos[-1]
-            target_event = evs[-1]
-            history_snos = snos[:-1][-self.hparams.max_history_items:]
-            history_evs = evs[:-1][-self.hparams.max_history_items:]
 
-            target_sid = self.store.lookup([target_sno])
-            history_sids = self.store.lookup(history_snos)
-            if target_sid is None or history_sids is None:
+            # SID 매핑 가능한 sno 만 사용
+            valid_sids = self.store.lookup(snos)
+            if valid_sids is None:
                 continue
-            target_sid = target_sid[0]
-            n_hist = history_sids.shape[0]
 
-            # encoder tokens (T_enc 길이, left-padded)
-            enc_tokens = np.zeros(max_T_enc, dtype=np.int64)
-            enc_beh = np.zeros(max_T_enc, dtype=np.int64)
-            flat = history_sids.flatten()
-            flat_beh = np.repeat(
-                [BEHAVIOR_TO_ID.get(e, 0) for e in history_evs], L
-            ).astype(np.int64)
-            enc_tokens[-n_hist * L:] = flat
-            enc_beh[-n_hist * L:] = flat_beh
+            # augment: random end positions; else: 마지막 1개만
+            n_pos = len(snos)
+            if augment:
+                k = min(self.hparams.augment_factor, n_pos - 1)
+                end_positions = rng.choice(np.arange(1, n_pos), size=k, replace=False).tolist()
+            else:
+                end_positions = [n_pos - 1]
 
-            enc_pos = np.arange(max_T_enc, dtype=np.int64)
-            enc_mask = (enc_tokens > 0).astype(np.int64)
+            for end in end_positions:
+                target_sid = valid_sids[end]
+                history_sids = valid_sids[max(0, end - self.hparams.max_history_items):end]
+                history_evs = evs[max(0, end - self.hparams.max_history_items):end]
+                if len(history_sids) < self.hparams.min_history_items:
+                    continue
+                target_event = evs[end]
+                n_hist = len(history_sids)
 
-            # decoder input = [BOS, sid_0, sid_1, ..., sid_{L-1}]
-            dec_input = np.concatenate([[BOS_ID], target_sid]).astype(np.int64)
-            # target = [sid_0, sid_1, ..., sid_{L-1}, EOS]
-            dec_target = np.concatenate([target_sid, [EOS_ID]]).astype(np.int64)
-            dec_pos = np.arange(dec_input.shape[0], dtype=np.int64)
+                enc_tokens = np.zeros(max_T_enc, dtype=np.int64)
+                enc_beh = np.zeros(max_T_enc, dtype=np.int64)
+                flat = history_sids.flatten()
+                flat_beh = np.repeat(
+                    [BEHAVIOR_TO_ID.get(e, 0) for e in history_evs], L
+                ).astype(np.int64)
+                enc_tokens[-n_hist * L:] = flat
+                enc_beh[-n_hist * L:] = flat_beh
+                enc_pos = np.arange(max_T_enc, dtype=np.int64)
+                enc_mask = (enc_tokens > 0).astype(np.int64)
+                dec_input = np.concatenate([[BOS_ID], target_sid]).astype(np.int64)
+                dec_target = np.concatenate([target_sid, [EOS_ID]]).astype(np.int64)
+                dec_pos = np.arange(dec_input.shape[0], dtype=np.int64)
 
-            samples.append({
-                "enc_tokens": enc_tokens,
-                "enc_beh": enc_beh,
-                "enc_pos": enc_pos,
-                "enc_mask": enc_mask,
-                "dec_input": dec_input,
-                "dec_target": dec_target,
-                "dec_pos": dec_pos,
-                "target_behavior": BEHAVIOR_TO_ID.get(target_event, 0),
-            })
+                samples.append({
+                    "enc_tokens": enc_tokens,
+                    "enc_beh": enc_beh,
+                    "enc_pos": enc_pos,
+                    "enc_mask": enc_mask,
+                    "dec_input": dec_input,
+                    "dec_target": dec_target,
+                    "dec_pos": dec_pos,
+                    "target_behavior": BEHAVIOR_TO_ID.get(target_event, 0),
+                })
         return samples
 
     def train_dataloader(self):

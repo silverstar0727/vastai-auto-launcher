@@ -14,6 +14,7 @@ import lightning as L
 from torchmetrics import Metric
 
 from nets.tiger_lite import TigerLiteNet, SIDTrie, ConstrainedBeamSearch
+from optimizers.linear_warmup import LinearWarmupCosineAnnealingLR
 
 
 BEHAVIOR_WEIGHTS: Dict[int, float] = {0: 0.0, 1: 1.0, 2: 3.0, 3: 5.0, 4: 20.0}
@@ -46,7 +47,9 @@ class TIGERLiteModel(L.LightningModule):
         eval_ks: tuple = (10, 50),
         # optim
         lr: float = 1e-3,
-        weight_decay: float = 0.0,
+        weight_decay: float = 0.01,
+        warmup_epochs: int = 3,
+        eta_min: float = 1e-5,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -132,6 +135,15 @@ class TIGERLiteModel(L.LightningModule):
                      prog_bar=(k == 10), on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(
-            self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay,
+        opt = torch.optim.AdamW(
+            self.parameters(), lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay,
         )
+        sched = LinearWarmupCosineAnnealingLR(
+            optimizer=opt,
+            warmup_epochs=self.hparams.warmup_epochs,
+            max_epochs=self.trainer.max_epochs,
+            warmup_start_lr=0.0,
+            eta_min=self.hparams.eta_min,
+        )
+        return [opt], [sched]

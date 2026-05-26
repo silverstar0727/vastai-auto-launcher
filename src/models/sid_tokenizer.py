@@ -15,6 +15,7 @@ import lightning as L
 from torchmetrics import Metric
 
 from nets.sid_v2 import RQVAE, ContentEncoder, co_occurrence_loss
+from optimizers.linear_warmup import LinearWarmupCosineAnnealingLR
 
 
 class _LossAcc(Metric):
@@ -71,6 +72,8 @@ class SIDTokenizerModel(L.LightningModule):
         ema_decay: float = 0.99,
         lr: float = 1e-3,
         weight_decay: float = 0.0,
+        warmup_epochs: int = 3,
+        eta_min: float = 1e-5,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -181,8 +184,16 @@ class SIDTokenizerModel(L.LightningModule):
             self.log(f"val/code_util_lvl{i}", u, prog_bar=False)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(
+        opt = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.lr,
             weight_decay=self.hparams.weight_decay,
         )
+        sched = LinearWarmupCosineAnnealingLR(
+            optimizer=opt,
+            warmup_epochs=self.hparams.warmup_epochs,
+            max_epochs=self.trainer.max_epochs,
+            warmup_start_lr=0.0,
+            eta_min=self.hparams.eta_min,
+        )
+        return [opt], [sched]

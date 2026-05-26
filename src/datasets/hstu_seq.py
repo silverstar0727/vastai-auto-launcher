@@ -63,21 +63,18 @@ class _ItemVocab:
 
 # -------- sequence build --------
 
-def _build_user_sequences(
+def _build_user_long_sequences(
     parquet_files: List[Path],
     vocab: _ItemVocab,
-    max_len: int,
+    max_history: int = 1000,   # user 전체 보관할 최대 길이 (augmentation 용)
     min_len: int = 5,
-) -> Dict[str, np.ndarray]:
-    """일별 parquet 들을 합쳐 user별 시간순 시퀀스 생성.
+) -> Dict[str, List[np.ndarray]]:
+    """user 별 시간순 전체 시퀀스 (jagged) 를 반환. augment 시 sub-sequence sampling.
 
     Returns:
-        {
-          'user_codes': (N,) str array,
-          'item_ids':   (N, T) int64 — 0 pad
-          'behavior_ids': (N, T) int64 — 0 pad
-          'lengths':    (N,)  int64
-        }
+        users: (N,) str
+        items: list of np.int64 array (가변 길이)
+        behs:  list of np.int64 array (가변 길이)
     """
     rows = []
     for fp in parquet_files:
@@ -88,8 +85,7 @@ def _build_user_sequences(
         rows.append(df)
     all_df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
     if all_df.empty:
-        return {"user_codes": np.array([]), "item_ids": np.zeros((0, max_len), dtype=np.int64),
-                "behavior_ids": np.zeros((0, max_len), dtype=np.int64), "lengths": np.zeros(0, dtype=np.int64)}
+        return {"user_codes": np.array([]), "items": [], "behs": []}
 
     all_df["item_id"] = vocab.lookup(all_df["goods_sno"].values)
     all_df["beh_id"] = all_df["event"].map(BEHAVIOR_TO_ID).fillna(0).astype(np.int64)
@@ -97,95 +93,120 @@ def _build_user_sequences(
     all_df = all_df.sort_values(["user_code", "ts"], kind="stable")
 
     user_codes: List[str] = []
-    item_seqs: List[np.ndarray] = []
-    beh_seqs: List[np.ndarray] = []
-    lengths: List[int] = []
+    items_list: List[np.ndarray] = []
+    behs_list: List[np.ndarray] = []
     for uc, g in all_df.groupby("user_code", sort=False):
-        items = g["item_id"].values
-        behs = g["beh_id"].values
+        items = g["item_id"].values[-max_history:]
+        behs = g["beh_id"].values[-max_history:]
         if len(items) < min_len:
             continue
-        items = items[-max_len:]
-        behs = behs[-max_len:]
-        L_ = len(items)
-        # left padding
-        item_pad = np.zeros(max_len, dtype=np.int64)
-        beh_pad = np.zeros(max_len, dtype=np.int64)
-        item_pad[-L_:] = items
-        beh_pad[-L_:] = behs
         user_codes.append(uc)
-        item_seqs.append(item_pad)
-        beh_seqs.append(beh_pad)
-        lengths.append(L_)
+        items_list.append(items)
+        behs_list.append(behs)
 
     return {
         "user_codes": np.array(user_codes),
-        "item_ids": np.stack(item_seqs) if item_seqs else np.zeros((0, max_len), dtype=np.int64),
-        "behavior_ids": np.stack(beh_seqs) if beh_seqs else np.zeros((0, max_len), dtype=np.int64),
-        "lengths": np.array(lengths, dtype=np.int64),
+        "items": items_list,
+        "behs": behs_list,
     }
 
 
 # -------- datasets --------
 
-class _NextItemTrainDataset(Dataset):
-    """학습: causal next-item prediction. input = seq[:-1], target = seq[1:]."""
+class _AugmentedTrainDataset(Dataset):
+    """학습: sliding sub-sequence augmentation.
 
-    def __init__(self, seqs: Dict[str, np.ndarray], max_len: int):
-        self.item = seqs["item_ids"]
-        self.beh = seqs["behavior_ids"]
-        self.lengths = seqs["lengths"]
+    user 전체 시퀀스에서 random end position 을 뽑아
+    [end - max_len, end-1] 를 input, end 위치 item 을 target 으로 사용.
+
+    augment_factor=N → user × N samples (data N× 확장).
+    user 시퀀스가 짧으면 augment_factor 만큼 못 만들고 가능한 만큼만.
+    """
+
+    def __init__(
+        self,
+        items_list: List[np.ndarray],
+        behs_list: List[np.ndarray],
+        max_len: int,
+        augment_factor: int = 8,
+        seed: int = 42,
+    ):
+        self.items_list = items_list
+        self.behs_list = behs_list
         self.max_len = max_len
+        self.augment_factor = augment_factor
+        rng = np.random.default_rng(seed)
+
+        # 미리 (user_idx, end_pos) pair 생성
+        self.samples: List[tuple] = []
+        for u_idx, items in enumerate(items_list):
+            L = len(items)
+            if L < 2:
+                continue
+            # 가능한 end position: [1, L-1] (target = items[end_pos])
+            n = min(augment_factor, L - 1)
+            ends = rng.choice(np.arange(1, L), size=n, replace=False)
+            for e in ends:
+                self.samples.append((u_idx, int(e)))
 
     def __len__(self):
-        return len(self.item)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        items = self.item[idx]
-        behs = self.beh[idx]
-        # input: 마지막 1개 제외 / target: 마지막 1개 (next-item)
-        # left-pad 형태라 마지막 위치가 시퀀스 끝
-        input_items = items.copy()
-        input_behs = behs.copy()
-        target_item = int(items[-1])
-        target_beh = int(behs[-1])
-        # input 의 마지막 1개를 pad 로 (causal)
-        input_items[-1] = 0
-        input_behs[-1] = 0
-        mask = (input_items > 0).astype(np.int64)
+        u_idx, end_pos = self.samples[idx]
+        items = self.items_list[u_idx]
+        behs = self.behs_list[u_idx]
+        start = max(0, end_pos - self.max_len)
+        in_items = items[start:end_pos]
+        in_behs = behs[start:end_pos]
+        target_item = int(items[end_pos])
+        target_beh = int(behs[end_pos])
+
+        # left-pad to max_len
+        item_pad = np.zeros(self.max_len, dtype=np.int64)
+        beh_pad = np.zeros(self.max_len, dtype=np.int64)
+        L = len(in_items)
+        item_pad[-L:] = in_items
+        beh_pad[-L:] = in_behs
         positions = np.arange(self.max_len, dtype=np.int64)
         return {
-            "item_ids": torch.from_numpy(input_items),
-            "behavior_ids": torch.from_numpy(input_behs),
+            "item_ids": torch.from_numpy(item_pad),
+            "behavior_ids": torch.from_numpy(beh_pad),
             "positions": torch.from_numpy(positions),
-            "mask": torch.from_numpy(mask).bool(),
+            "mask": torch.from_numpy((item_pad > 0).astype(np.int64)).bool(),
             "target_item": torch.tensor(target_item, dtype=torch.long),
             "target_behavior": torch.tensor(target_beh, dtype=torch.long),
         }
 
 
 class _EvalDataset(Dataset):
-    """val/test: 같은 형식, target_item 은 hold-out (마지막)."""
-    def __init__(self, seqs: Dict[str, np.ndarray], max_len: int):
-        self.item = seqs["item_ids"]
-        self.beh = seqs["behavior_ids"]
+    """val/test: 각 user 마지막 1개 item 을 hold-out target."""
+    def __init__(self, items_list: List[np.ndarray], behs_list: List[np.ndarray], max_len: int):
+        self.items_list = items_list
+        self.behs_list = behs_list
         self.max_len = max_len
 
     def __len__(self):
-        return len(self.item)
+        return len(self.items_list)
 
     def __getitem__(self, idx):
-        items = self.item[idx]
-        behs = self.beh[idx]
-        target_item = int(items[-1])
-        input_items = items.copy(); input_items[-1] = 0
-        input_behs = behs.copy(); input_behs[-1] = 0
-        positions = np.arange(self.max_len, dtype=np.int64)
+        items = self.items_list[idx]
+        behs = self.behs_list[idx]
+        end_pos = len(items) - 1
+        start = max(0, end_pos - self.max_len)
+        in_items = items[start:end_pos]
+        in_behs = behs[start:end_pos]
+        target_item = int(items[end_pos])
+        item_pad = np.zeros(self.max_len, dtype=np.int64)
+        beh_pad = np.zeros(self.max_len, dtype=np.int64)
+        L = len(in_items)
+        item_pad[-L:] = in_items
+        beh_pad[-L:] = in_behs
         return {
-            "item_ids": torch.from_numpy(input_items),
-            "behavior_ids": torch.from_numpy(input_behs),
-            "positions": torch.from_numpy(positions),
-            "mask": torch.from_numpy((input_items > 0).astype(np.int64)).bool(),
+            "item_ids": torch.from_numpy(item_pad),
+            "behavior_ids": torch.from_numpy(beh_pad),
+            "positions": torch.from_numpy(np.arange(self.max_len, dtype=np.int64)),
+            "mask": torch.from_numpy((item_pad > 0).astype(np.int64)).bool(),
             "target_item": torch.tensor(target_item, dtype=torch.long),
         }
 
@@ -198,12 +219,15 @@ class HSTUSequentialDataModule(L.LightningDataModule):
         base_dir: str = "/home/jeongmindo/projects/ably/data/reco_experiments/v2_full",
         max_seq_len: int = 200,
         min_seq_len: int = 5,
+        max_user_history: int = 1000,
+        augment_factor: int = 8,
         batch_size: int = 256,
         eval_batch_size: int = 128,
         num_workers: int = 4,
-        train_days: int = 14,    # PoC 부담 줄이기 위해 train 마지막 N 일만 우선 사용
+        train_days: int = 30,
         val_days: int = 7,
         test_days: int = 16,
+        seed: int = 42,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -230,27 +254,38 @@ class HSTUSequentialDataModule(L.LightningDataModule):
         val_files = sorted((self.base / "interactions" / "val").glob("*.parquet"))[-self.hparams.val_days:]
         test_files = sorted((self.base / "interactions" / "test").glob("*.parquet"))[-self.hparams.test_days:]
 
-        self._train_seqs = _build_user_sequences(train_files, self.vocab,
-                                                  self.hparams.max_seq_len, self.hparams.min_seq_len)
-        self._val_seqs = _build_user_sequences(val_files, self.vocab,
-                                                self.hparams.max_seq_len, self.hparams.min_seq_len)
-        self._test_seqs = _build_user_sequences(test_files, self.vocab,
-                                                 self.hparams.max_seq_len, self.hparams.min_seq_len)
+        self._train_seqs = _build_user_long_sequences(
+            train_files, self.vocab,
+            max_history=self.hparams.max_user_history, min_len=self.hparams.min_seq_len,
+        )
+        self._val_seqs = _build_user_long_sequences(
+            val_files, self.vocab,
+            max_history=self.hparams.max_user_history, min_len=self.hparams.min_seq_len,
+        )
+        self._test_seqs = _build_user_long_sequences(
+            test_files, self.vocab,
+            max_history=self.hparams.max_user_history, min_len=self.hparams.min_seq_len,
+        )
 
     def train_dataloader(self):
-        ds = _NextItemTrainDataset(self._train_seqs, self.hparams.max_seq_len)
+        ds = _AugmentedTrainDataset(
+            self._train_seqs["items"], self._train_seqs["behs"],
+            max_len=self.hparams.max_seq_len,
+            augment_factor=self.hparams.augment_factor,
+            seed=self.hparams.seed,
+        )
         return DataLoader(ds, batch_size=self.hparams.batch_size, shuffle=True,
                           num_workers=self.hparams.num_workers, pin_memory=True,
                           persistent_workers=self.hparams.num_workers > 0, drop_last=True)
 
     def val_dataloader(self):
-        ds = _EvalDataset(self._val_seqs, self.hparams.max_seq_len)
+        ds = _EvalDataset(self._val_seqs["items"], self._val_seqs["behs"], self.hparams.max_seq_len)
         return DataLoader(ds, batch_size=self.hparams.eval_batch_size, shuffle=False,
                           num_workers=self.hparams.num_workers, pin_memory=True,
                           persistent_workers=self.hparams.num_workers > 0)
 
     def test_dataloader(self):
-        ds = _EvalDataset(self._test_seqs, self.hparams.max_seq_len)
+        ds = _EvalDataset(self._test_seqs["items"], self._test_seqs["behs"], self.hparams.max_seq_len)
         return DataLoader(ds, batch_size=self.hparams.eval_batch_size, shuffle=False,
                           num_workers=self.hparams.num_workers, pin_memory=True,
                           persistent_workers=self.hparams.num_workers > 0)

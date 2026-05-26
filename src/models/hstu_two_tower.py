@@ -14,6 +14,7 @@ import lightning as L
 from torchmetrics import Metric
 
 from nets.hstu import HSTUTwoTowerNet
+from optimizers.linear_warmup import LinearWarmupCosineAnnealingLR
 
 
 # behavior 별 학습 가중치 (PoC 기본; click 1, like 3, cart 5, purchase 20)
@@ -67,7 +68,9 @@ class HSTUTwoTowerModel(L.LightningModule):
         dropout: float = 0.1,
         # learning
         lr: float = 1e-3,
-        weight_decay: float = 0.0,
+        weight_decay: float = 0.01,
+        warmup_epochs: int = 3,
+        eta_min: float = 1e-5,
         # eval ks
         eval_ks: tuple = (10, 50),
     ):
@@ -153,4 +156,15 @@ class HSTUTwoTowerModel(L.LightningModule):
         return self.validation_step(batch, batch_idx)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+        opt = torch.optim.AdamW(
+            self.parameters(), lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay,
+        )
+        sched = LinearWarmupCosineAnnealingLR(
+            optimizer=opt,
+            warmup_epochs=self.hparams.warmup_epochs,
+            max_epochs=self.trainer.max_epochs,
+            warmup_start_lr=0.0,
+            eta_min=self.hparams.eta_min,
+        )
+        return [opt], [sched]

@@ -1,8 +1,5 @@
-# SID Tokenizer (RQ-VAE, PLUM SIDv2 lineage)
-# 학습: content embedding (text + cat + brand + price) → RQ-VAE → Semantic ID
-# 산출: codebook + item→SID 매핑
-#
-# Dependency: Task #4 (item_meta) + Task #9 (text embedding) 완료 후 실행 가능.
+# SID Tokenizer (RQ-VAE) — PoC v2_full 본격 학습
+# 데이터: 1.4M active items, distiluse 512-d 텍스트 임베딩 사전 추출.
 
 name: sid_v2
 version: v1
@@ -12,56 +9,62 @@ seed_everything: 42
 trainer:
   accelerator: auto
   precision: 16-mixed
-  max_epochs: 30
-  deterministic: false           # EMA codebook update 가 비결정적
+  max_epochs: 50
+  deterministic: false
   num_sanity_val_steps: 0
   enable_progress_bar: true
   log_every_n_steps: 50
+  callbacks:
+    - class_path: SaveSIDMapCallback
+      init_args:
+        output_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full/meta
 
 model:
   class_path: SIDTokenizerModel
   init_args:
-    # latent / codebook (PLUM 기본 multi-resolution)
-    latent_dim: 256
-    codebook_sizes: [2048, 1024, 512]
+    # latent / codebook — multi-resolution (PLUM 패턴)
+    latent_dim: 384                # 256 → 384
+    codebook_sizes: [2048, 1024, 512]   # total ~ 1B unique SID combinations (1.4M items에 충분)
     # content
-    text_dim: 512                # distiluse-base-multilingual-cased
-    image_dim: 0                 # v1 미사용
+    text_dim: 512
+    image_dim: 0
     cat_emb_dim: 64
-    brand_emb_dim: 32
+    brand_emb_dim: 48
     num_price_buckets: 10
     price_emb_dim: 16
     content_out_dim: 512
-    # loss weights
+    # losses
     recon_weight: 1.0
     vq_weight: 1.0
-    co_weight: 0.5               # co-occurrence (PLUM 핵심)
+    co_weight: 0.5                 # PLUM ablation: 가장 큰 lift
     co_temperature: 0.07
-    # arch
-    encoder_hidden: [512, 256]
-    decoder_hidden: [256, 512]
+    # arch (encoder/decoder capacity 키움)
+    encoder_hidden: [768, 384]
+    decoder_hidden: [384, 768]
     dropout: 0.1
     commitment_cost: 0.25
     ema_decay: 0.99
-    # optim
+    # optim + cosine schedule
     lr: 0.001
     weight_decay: 0.0
+    warmup_epochs: 3
+    eta_min: 0.00001
 
 data:
   class_path: SIDTokenizerDataModule
   init_args:
     base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
-    num_pairs_per_user: 4
-    max_train_pairs: 5_000_000
+    num_pairs_per_user: 8         # 4 → 8
+    max_train_pairs: 20_000_000   # 5M → 20M (PoC 적정)
     num_price_buckets: 10
-    batch_size: 4096
-    test_batch_size: 2048
+    batch_size: 8192              # 4096 → 8192
+    test_batch_size: 4096
     num_workers: 4
     seed: 42
 
 early_stopping:
   monitor: val/sid_uniqueness
-  patience: 10
+  patience: 8
   mode: max
 
 model_ckpt:
