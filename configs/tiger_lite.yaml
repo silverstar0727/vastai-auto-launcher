@@ -1,0 +1,58 @@
+# TIGER-lite generative recommendation
+# Dependency: meta/item_to_sid.parquet (SID Tokenizer 학습 후 산출)
+#             + interactions/{train,val,test}/
+
+name: tiger_lite
+version: v1
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: 16-mixed
+  max_epochs: 30
+  deterministic: false
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  log_every_n_steps: 100
+
+model:
+  class_path: TIGERLiteModel
+  init_args:
+    dim: 384
+    n_enc_layers: 4
+    n_dec_layers: 4
+    n_heads: 6
+    ff_dim: 1536
+    dropout: 0.1
+    beam_width: 32
+    eval_ks: [10, 50]
+    lr: 0.001
+    weight_decay: 0.0
+
+data:
+  class_path: TIGERLiteDataModule
+  init_args:
+    base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
+    codebook_sizes: [2048, 1024, 512]
+    max_history_items: 50
+    min_history_items: 5
+    batch_size: 128
+    eval_batch_size: 64
+    num_workers: 4
+    train_days: 14
+    val_days: 7
+    test_days: 16
+
+early_stopping:
+  monitor: val/Recall@10
+  patience: 5
+  mode: max
+
+model_ckpt:
+  monitor: val/Recall@10
+  mode: max
+  filename: "best_tiger_lite"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1
