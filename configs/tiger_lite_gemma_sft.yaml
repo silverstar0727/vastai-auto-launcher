@@ -1,0 +1,73 @@
+# TIGER-Gemma SFT (Supervised Fine-Tuning) — Stage 2/2
+# CPT 끝난 체크포인트에서 시작 (ckpt_path 명시)
+# 학습 목표: user history → next item SID 자가회귀 생성
+
+name: tiger_gemma_sft
+version: v1
+
+seed_everything: 42
+
+ckpt_path: logs/tiger_gemma_cpt/v1/fit/checkpoints/best_tiger_gemma_cpt.ckpt
+weights_only: true              # CPT 가중치만 가져옴 (optimizer state X)
+
+trainer:
+  accelerator: auto
+  precision: bf16-mixed
+  max_epochs: 3
+  deterministic: false
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  log_every_n_steps: 25
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 4     # effective batch = 8 × 4 = 32
+
+model:
+  class_path: TIGERGemmaModel
+  init_args:
+    stage: "sft"
+    model_name: google/gemma-4-E4B
+    codebook_sizes: [2048, 1024, 512]
+    lora_r: 32
+    lora_alpha: 64
+    lora_dropout: 0.05
+    target_modules_regex: ".*language_model\\.layers\\.\\d+\\.(self_attn\\.(q_proj|k_proj|v_proj|o_proj)|mlp\\.(gate_proj|up_proj|down_proj))$"
+    load_in_4bit: false
+    lr: 0.00003                  # SFT 는 CPT 보다 약간 낮게
+    weight_decay: 0.01
+    warmup_epochs: 1
+    eta_min: 0.000001
+    beam_width: 32
+    eval_ks: [10, 50]
+
+# SFT 데이터셋 — 일단 CPT 와 같은 데이터셋 사용 (user-seq 만, item-meta 비율 0)
+# 추후 별도 SFT-only 데이터셋 만들 수 있음
+data:
+  class_path: TIGERGemmaCPTDataModule
+  init_args:
+    base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
+    model_name: google/gemma-4-E4B
+    codebook_sizes: [2048, 1024, 512]
+    max_seq_len: 1024
+    max_history_items: 50
+    max_train_user_samples: 1_000_000
+    max_train_item_samples: 0    # SFT 는 item meta 안 씀
+    ratio_user_to_item: 1.0
+    train_days: 14
+    val_days: 7
+    batch_size: 8
+    eval_batch_size: 4
+    num_workers: 2
+    seed: 42
+
+early_stopping:
+  monitor: val/loss
+  patience: 2
+  mode: min
+
+model_ckpt:
+  monitor: val/loss
+  mode: min
+  filename: "best_tiger_gemma_sft"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1

@@ -1,0 +1,72 @@
+# TIGER-Gemma CPT (Continued Pre-Training)
+# Gemma 3 4B + LoRA(rank 32) + new SID/BEH tokens
+# Stage 1/2: user behavior seq + item metadata next-token prediction (PLUM 패턴)
+
+name: tiger_gemma_cpt
+version: v1
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: bf16-mixed           # Gemma 4 native bfloat16
+  max_epochs: 2                  # CPT 는 보통 1-2 epoch
+  deterministic: false
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  log_every_n_steps: 25
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 16    # batch 2 × accum 16 = effective 32
+  # step 단위 validation: epoch 1번 대신 epoch의 10%마다 (epoch당 10번)
+  # 3일 학습 동안 약 20번 validation → early stopping + 진행 추적
+  val_check_interval: 0.1
+  limit_val_batches: 100         # validation 100 batch 만 (빠르게)
+
+model:
+  class_path: TIGERGemmaModel
+  init_args:
+    stage: "cpt"
+    model_name: google/gemma-4-E4B
+    codebook_sizes: [2048, 1024, 512]
+    lora_r: 32
+    lora_alpha: 64
+    lora_dropout: 0.05
+    # Gemma 4 multimodal: text language_model 만 매칭 (vision/audio 제외)
+    target_modules_regex: ".*language_model\\.layers\\.\\d+\\.(self_attn\\.(q_proj|k_proj|v_proj|o_proj)|mlp\\.(gate_proj|up_proj|down_proj))$"
+    load_in_4bit: false
+    lr: 0.00005             # 5e-5 — LoRA 표준
+    weight_decay: 0.01
+    warmup_ratio: 0.03      # 전체 step 의 3% warmup (step 단위)
+    eta_min: 0.000001
+
+data:
+  class_path: TIGERGemmaCPTDataModule
+  init_args:
+    base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
+    model_name: google/gemma-4-E4B
+    codebook_sizes: [2048, 1024, 512]
+    max_seq_len: 512
+    max_history_items: 30
+    # ~3일 학습 목표: 300K samples × 2 epoch = 60만 forward ÷ 2.2/s ≈ 3.1일
+    max_train_user_samples: 150_000   # user 다양성
+    max_train_item_samples: 150_000   # item-meta SID align (활성 12%)
+    ratio_user_to_item: 0.5
+    train_days: 30                # user 시퀀스 더 다양하게 (14 → 30일)
+    val_days: 7
+    batch_size: 2
+    eval_batch_size: 2
+    num_workers: 2
+    seed: 42
+
+early_stopping:
+  monitor: val/ppl
+  patience: 5                    # step-validation 이라 5번 연속 개선 없으면 stop
+  mode: min
+
+model_ckpt:
+  monitor: val/ppl
+  mode: min
+  filename: "best_tiger_gemma_cpt"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1
