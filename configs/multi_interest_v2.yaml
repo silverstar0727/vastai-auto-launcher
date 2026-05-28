@@ -1,0 +1,86 @@
+# Multi-Interest on v2_full PoC data — TIGER-lite 와의 offline test 비교용
+#
+# 설계 doc: data/reco_experiments/v2_full/EXPERIMENT_MULTI_INTEREST_VS_TIGER.md
+# Production 참조: docs/inhouse_kube/src/apps/multi_interest/pipeline_config.py
+#
+# Model section: configs/multi_interest.yaml 의 production 설정을 그대로 유지
+#   (K=4 interests, embed 128, Adam lr 1e-3 + StepLR(step 4, γ 0.1), epochs 10).
+# Data section: 새 MultiInterestV2DataModule — v2_full parquet 직접 로드.
+#   production 1년치 vs v2_full 98일 → 가용 최대 사용. caveat 는 doc 참조.
+
+name: multi_interest
+version: v2_full
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: 16-mixed
+  max_epochs: 10
+  deterministic: true
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  log_every_n_steps: 50
+
+model:
+  class_path: MultiInterestModel
+  init_args:
+    # === production multi_interest.yaml 그대로 ===
+    embedding_size: 128
+    use_item_bias: true
+    attention_size: 8
+    interest_count: 4
+    use_rank_learning: false
+    soft_selection: false
+    top_k: 10
+    optimizer_params:
+      optimizer: adam
+      lr: 0.001
+      weight_decay: 0.0
+      lr_scheduler: step
+      lr_scheduler_step: 4
+      lr_scheduler_gamma: 0.1
+
+data:
+  class_path: MultiInterestV2DataModule
+  init_args:
+    base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
+    # 데이터 윈도우 (production: 1년 → 가용 최대 98일)
+    train_days: 98
+    val_days: 7
+    test_days: 16
+    # production 필터 (`pipeline_config.py:60, multi_interest.yaml:48`)
+    min_actions_per_user: 100
+    max_items: 300_000
+    # 시퀀스
+    max_len: 80
+    # 배치
+    batch_size: 2048
+    test_batch_size: 64
+    num_workers: 2
+    drop_last_batch: true
+    # 학습 샘플 (production kubeflow 인자 그대로)
+    num_train_sample_per_user: 60
+    preference_event_weight: 40.0
+    next_items_window_size: 5
+    final_item_sampling_weight: 3.0
+    final_item_score: 1.0
+    use_rank_learning: false
+    # val cap — TIGER-lite v6 와 동일 1,920 user
+    max_val_samples: 1920
+    # 시드
+    dataloader_random_seed: 0
+    seed: 42
+
+early_stopping:
+  monitor: val/NDCG_10
+  patience: 5
+  mode: max
+
+model_ckpt:
+  monitor: val/NDCG_10
+  mode: max
+  filename: "best_acc_model"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1
