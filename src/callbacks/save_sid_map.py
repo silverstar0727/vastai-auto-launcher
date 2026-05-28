@@ -64,10 +64,20 @@ class SaveSIDMapCallback(L.Callback):
         for l in range(L_):
             df[f"sid_{l}"] = all_codes[:, l]
 
+        # TIGER 충돌 처리: 같은 (sid_0..sid_{L-1}) 튜플 items 에 4번째 토큰(sid_L) 부여
+        # cumcount → 0,1,2,... (충돌 없으면 0). uniqueness 100% 보장.
+        sid_cols = [f"sid_{l}" for l in range(L_)]
+        df[f"sid_{L_}"] = df.groupby(sid_cols).cumcount().astype("int64")
+        max_collision = int(df[f"sid_{L_}"].max())
+        n_collided = int((df[f"sid_{L_}"] > 0).sum())
+        print(f"[SaveSIDMapCallback] collision token sid_{L_}: "
+              f"max={max_collision}, collided items={n_collided:,} "
+              f"({n_collided/len(df)*100:.2f}%)")
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
         out_parquet = self.output_dir / "item_to_sid.parquet"
         df.to_parquet(out_parquet, index=False)
-        print(f"[SaveSIDMapCallback] {out_parquet} ({len(df):,} rows)")
+        print(f"[SaveSIDMapCallback] {out_parquet} ({len(df):,} rows, SID 길이={L_+1})")
 
         # codebook 도 저장 (디버그용)
         codebooks = {}

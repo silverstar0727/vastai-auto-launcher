@@ -6,3 +6,4 @@ from . import lightgcn
 from . import sid_tokenizer
 from . import hstu_two_tower
 from . import tiger_lite
+from . import tiger_lite_gemma

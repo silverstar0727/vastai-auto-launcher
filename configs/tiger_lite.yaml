@@ -13,8 +13,11 @@ trainer:
   deterministic: false
   num_sanity_val_steps: 0
   enable_progress_bar: true
-  log_every_n_steps: 100
+  log_every_n_steps: 50
   gradient_clip_val: 1.0
+  # validation: beam search 가 user×beam batch=1 루프라 매우 비쌈.
+  # 전체 1.73M val 을 다 돌면 epoch 당 수십 시간 → 소량 subset 으로 모니터링.
+  limit_val_batches: 15
 
 model:
   class_path: TIGERLiteModel
@@ -29,24 +32,24 @@ model:
     dropout: 0.2
     beam_width: 32
     eval_ks: [10, 50]
-    lr: 0.002
+    lr: 0.002                       # from-scratch 안전 peak (step warmup 적용)
     weight_decay: 0.01
-    warmup_epochs: 3
+    warmup_epochs: 3                # (미사용 — step 단위 warmup 으로 전환)
     eta_min: 0.00001
 
 data:
   class_path: TIGERLiteDataModule
   init_args:
     base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
-    codebook_sizes: [2048, 1024, 512]
-    max_history_items: 50           # T_enc = 50 × 3 = 150
+    codebook_sizes: [2048, 1024, 512, 164]   # +충돌토큰 sid_3 (max 163 → cardinality 164)
+    max_history_items: 50           # T_enc = 50 × 4 = 200
     min_history_items: 5
     max_user_history: 500           # augment 시 sequence 원본
-    augment_factor: 8               # user당 8 sub-sequence
-    batch_size: 128
-    eval_batch_size: 64
-    num_workers: 4
-    train_days: 30
+    augment_factor: 4               # user당 8 sub-sequence
+    batch_size: 1024                # 512 → 1024 (메모리 36%였음, 2× 빠름)
+    eval_batch_size: 128            # beam search val 은 메모리 크니 보수적
+    num_workers: 0
+    train_days: 14
     val_days: 7
     test_days: 16
     seed: 42

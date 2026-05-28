@@ -100,12 +100,11 @@ class TIGERLiteModel(L.LightningModule):
             device=logits.device,
         )
         loss = (per_sample * weights).sum() / weights.sum().clamp(min=1e-6)
-        self.loss_acc(loss)
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True,
+                 batch_size=target.size(0))
+        self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"],
+                 on_step=True, prog_bar=True)
         return loss
-
-    def on_train_epoch_end(self):
-        self.log("train/loss", self.loss_acc.compute(), prog_bar=True)
-        self.loss_acc.reset()
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
@@ -139,11 +138,14 @@ class TIGERLiteModel(L.LightningModule):
             self.parameters(), lr=self.hparams.lr,
             weight_decay=self.hparams.weight_decay,
         )
-        sched = LinearWarmupCosineAnnealingLR(
-            optimizer=opt,
-            warmup_epochs=self.hparams.warmup_epochs,
-            max_epochs=self.trainer.max_epochs,
-            warmup_start_lr=0.0,
-            eta_min=self.hparams.eta_min,
+        # step 단위 warmup+cosine. epoch 단위 스케줄러는 epoch 0 내내 lr=0 → 학습 안 됨.
+        from transformers import get_cosine_schedule_with_warmup
+        total_steps = int(self.trainer.estimated_stepping_batches)
+        warmup_steps = min(1500, max(100, total_steps // 100))
+        sched = get_cosine_schedule_with_warmup(
+            opt, num_warmup_steps=warmup_steps, num_training_steps=total_steps,
         )
-        return [opt], [sched]
+        print(f"[optim] total_steps={total_steps} warmup_steps={warmup_steps} "
+              f"peak_lr={self.hparams.lr}", flush=True)
+        return {"optimizer": opt,
+                "lr_scheduler": {"scheduler": sched, "interval": "step", "frequency": 1}}

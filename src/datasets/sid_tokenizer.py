@@ -40,8 +40,20 @@ def _price_bucket(price: pd.Series, n_buckets: int) -> pd.Series:
 
 # -------- dataset --------
 
+# vocab 컨벤션: 0 = PAD (시퀀스 빈 자리, gradient 안 흐름),
+#               1 = UNK (정보 누락 — 의미 있는 학습 가능 토큰)
+PAD_IDX = 0
+UNK_IDX = 1
+
+
 class _ItemFeatureStore:
-    """item 한 개의 모든 feature 를 한 번에 조회 (torch tensor)."""
+    """item 한 개의 모든 feature 를 한 번에 조회 (torch tensor).
+
+    vocab 처리:
+      - category/brand 결측 → UNK_IDX (1). "정보 없음" 자체를 학습 가능 임베딩으로.
+      - 미등록 sno (학습 vocab 밖) → UNK_IDX.
+      - PAD (0) 은 시퀀스 padding 위치용으로 예약.
+    """
 
     def __init__(
         self,
@@ -59,14 +71,28 @@ class _ItemFeatureStore:
         self.brand_sno_to_idx = brand_sno_to_idx or {}
         self.num_price_buckets = num_price_buckets
 
-        # vectorized lookup
+        item_meta_df = item_meta_df.copy()
+        cat_series = pd.to_numeric(item_meta_df["standard_category_sno"], errors="coerce")
+        brand_series = pd.to_numeric(item_meta_df["brand_sno"], errors="coerce")
+        item_meta_df["goods_sno"] = item_meta_df["goods_sno"].astype("int64")
+
         self.goods_index: Dict[int, int] = {}
         cat_arr = []
         brand_arr = []
-        for i, row in enumerate(item_meta_df.itertuples(index=False)):
-            self.goods_index[int(row.goods_sno)] = i
-            cat_arr.append(self.category_sno_to_idx.get(int(row.standard_category_sno or 0), 0))
-            brand_arr.append(self.brand_sno_to_idx.get(int(row.brand_sno or 0), 0))
+        for i, (sno, cat, brand) in enumerate(
+            zip(item_meta_df["goods_sno"].values, cat_series.values, brand_series.values)
+        ):
+            self.goods_index[int(sno)] = i
+            # cat: NaN/0/미등록 → UNK
+            if pd.isna(cat) or cat <= 0:
+                cat_arr.append(UNK_IDX)
+            else:
+                cat_arr.append(self.category_sno_to_idx.get(int(cat), UNK_IDX))
+            # brand: NaN/0/미등록 → UNK
+            if pd.isna(brand) or brand <= 0:
+                brand_arr.append(UNK_IDX)
+            else:
+                brand_arr.append(self.brand_sno_to_idx.get(int(brand), UNK_IDX))
         self.category_id = np.array(cat_arr, dtype=np.int64)
         self.brand_id = np.array(brand_arr, dtype=np.int64)
 
@@ -76,13 +102,13 @@ class _ItemFeatureStore:
     def get(self, goods_sno: int) -> Dict[str, torch.Tensor]:
         i = self.goods_index.get(int(goods_sno))
         if i is None:
-            # padding-like dummy (zero text emb + 0 category/brand/price)
+            # 미등록 sno — text emb 도 없고 category/brand 도 UNK
             text = np.zeros(self.text_emb.shape[1], dtype=np.float32)
             return {
                 "text_emb": torch.from_numpy(text),
-                "category_id": torch.tensor(0, dtype=torch.long),
-                "brand_id": torch.tensor(0, dtype=torch.long),
-                "price_bucket": torch.tensor(0, dtype=torch.long),
+                "category_id": torch.tensor(UNK_IDX, dtype=torch.long),
+                "brand_id": torch.tensor(UNK_IDX, dtype=torch.long),
+                "price_bucket": torch.tensor(UNK_IDX, dtype=torch.long),
             }
         text_row = self.text_emb_index.get(int(goods_sno))
         text = (
@@ -165,15 +191,16 @@ class SIDTokenizerDataModule(L.LightningDataModule):
         meta["goods_sno"] = pd.to_numeric(meta["goods_sno"], errors="coerce").astype("int64")
         meta = meta[meta["goods_sno"].isin(active["goods_sno"])].reset_index(drop=True)
 
-        # category vocab
+        # category vocab — index 0=PAD, 1=UNK, 2..N+1=실제 카테고리 sno
         cat_meta = pd.read_parquet(self.base / "meta" / "standard_category.parquet")
-        cat_map = {int(s): i + 1 for i, s in enumerate(cat_meta["sno"].astype(int))}
-        self.num_categories = len(cat_map) + 1
+        cat_map = {int(s): i + 2 for i, s in enumerate(cat_meta["sno"].astype(int))}
+        self.num_categories = len(cat_map) + 2  # PAD + UNK + 실제
 
-        # brand vocab (현재 active items 에 등장하는 brand_sno 한정)
-        brand_unique = sorted(set(meta["brand_sno"].fillna(0).astype(int).tolist()))
-        brand_map = {b: i + 1 for i, b in enumerate(brand_unique) if b > 0}
-        self.num_brands = len(brand_map) + 1
+        # brand vocab — active items 의 실제 brand_sno 만 (>0). 같은 규약.
+        brand_series = pd.to_numeric(meta["brand_sno"], errors="coerce")
+        brand_unique = sorted({int(b) for b in brand_series.dropna().tolist() if b > 0})
+        brand_map = {b: i + 2 for i, b in enumerate(brand_unique)}
+        self.num_brands = len(brand_map) + 2  # PAD + UNK + 실제
 
         # text emb 로드
         emb_path = self.base / "embeddings" / "item_text_emb.npy"

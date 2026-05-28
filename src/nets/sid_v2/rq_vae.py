@@ -45,6 +45,8 @@ class ResidualQuantizer(nn.Module):
         commitment_cost: float = 0.25,
         ema_decay: float = 0.99,
         eps: float = 1e-5,
+        dead_code_threshold: float = 0.01,  # 균등 분포 대비 비율
+        dead_code_check_every: int = 200,
     ):
         super().__init__()
         self.dim = dim
@@ -53,8 +55,14 @@ class ResidualQuantizer(nn.Module):
         self.commitment_cost = commitment_cost
         self.ema_decay = ema_decay
         self.eps = eps
+        self.dead_code_threshold = dead_code_threshold
+        self.dead_code_check_every = dead_code_check_every
 
-        # 각 레벨별 codebook (uniform init, scaled)
+        # init flag (첫 forward 에서 data-driven init 실행)
+        self.register_buffer("_initted", torch.zeros(1, dtype=torch.bool))
+        self.register_buffer("_step_count", torch.zeros(1, dtype=torch.long))
+
+        # 각 레벨별 codebook (uniform init, scaled — 첫 forward 시 데이터로 교체됨)
         for i, n in enumerate(codebook_sizes):
             embed = torch.randn(n, dim) * (1.0 / (dim ** 0.5))
             self.register_buffer(f"codebook_{i}", embed)
@@ -83,6 +91,11 @@ class ResidualQuantizer(nn.Module):
             codes: (B, num_levels) — 각 레벨의 codebook index
             vq_loss: scalar — commitment + (EMA 가 아니면) codebook loss
         """
+        # 첫 forward: codebook 을 데이터로 init (K-means 대신 random sample)
+        if self.training and not self._initted.item():
+            self._init_from_data(z)
+            self._initted.fill_(True)
+
         residual = z
         quantized_sum = torch.zeros_like(z)
         all_codes: List[torch.Tensor] = []
@@ -93,7 +106,6 @@ class ResidualQuantizer(nn.Module):
             q, codes, codebook = self._quantize_level(residual, level)
             all_codes.append(codes)
             quantized_sum = quantized_sum + q
-            # commitment: encoder side
             commitment_loss = commitment_loss + F.mse_loss(residual, q.detach())
             if self.ema_decay <= 0:
                 codebook_loss = codebook_loss + F.mse_loss(q, residual.detach())
@@ -102,11 +114,75 @@ class ResidualQuantizer(nn.Module):
                     self._ema_update(level, residual.detach(), codes)
             residual = residual - q.detach()
 
+        # 주기적 dead code restart (training 만)
+        if self.training:
+            self._step_count += 1
+            if int(self._step_count.item()) % self.dead_code_check_every == 0:
+                self._revive_dead_codes(z.detach())
+
         # straight-through
         quantized_st = z + (quantized_sum - z).detach()
         codes_out = torch.stack(all_codes, dim=-1)  # (B, L)
         vq_loss = self.commitment_cost * commitment_loss + codebook_loss
         return quantized_st, codes_out, vq_loss
+
+    @torch.no_grad()
+    def _init_from_data(self, z: torch.Tensor):
+        """첫 batch z 로 codebook 을 k-means 초기화 (TIGER 논문: collapse 방지 핵심).
+
+        레벨별로 현재 residual 에 k-means 를 돌려 centroid 를 codebook 으로 사용.
+        batch 가 작으면 random sample fallback.
+        """
+        from sklearn.cluster import MiniBatchKMeans
+
+        residual = z
+        for level in range(self.num_levels):
+            n = self.codebook_sizes[level]
+            B = residual.size(0)
+            codebook = getattr(self, f"codebook_{level}")
+            if B >= n:
+                # k-means (CPU numpy)
+                data = residual.float().cpu().numpy()
+                km = MiniBatchKMeans(
+                    n_clusters=n, batch_size=4096, max_iter=50,
+                    n_init=3, random_state=42,
+                )
+                km.fit(data)
+                centroids = torch.from_numpy(km.cluster_centers_).to(
+                    device=residual.device, dtype=codebook.dtype
+                )
+            else:
+                # fallback: random sample
+                idx = torch.randint(0, B, (n,), device=residual.device)
+                centroids = residual[idx].to(codebook.dtype).contiguous()
+            codebook.copy_(centroids)
+            getattr(self, f"ema_embed_{level}").copy_(centroids)
+            getattr(self, f"ema_cluster_size_{level}").fill_(1.0)
+            q, _, _ = self._quantize_level(residual, level)
+            residual = residual - q
+
+    @torch.no_grad()
+    def _revive_dead_codes(self, batch_z: torch.Tensor):
+        """ema_cluster_size 가 threshold 이하인 code 를 현재 batch sample 로 재초기화."""
+        residual = batch_z
+        for level in range(self.num_levels):
+            n = self.codebook_sizes[level]
+            cs = getattr(self, f"ema_cluster_size_{level}")
+            total = cs.sum().clamp(min=1e-9)
+            ratio = cs / total
+            uniform_ratio = 1.0 / n
+            dead_mask = ratio < (uniform_ratio * self.dead_code_threshold)
+            n_dead = int(dead_mask.sum().item())
+            if n_dead > 0:
+                B = residual.size(0)
+                idx = torch.randint(0, B, (n_dead,), device=residual.device)
+                codebook = getattr(self, f"codebook_{level}")
+                samples = residual[idx].to(codebook.dtype)
+                codebook[dead_mask] = samples
+                getattr(self, f"ema_embed_{level}")[dead_mask] = samples
+                cs[dead_mask] = total / n
+            q, _, _ = self._quantize_level(residual, level)
+            residual = residual - q
 
     @torch.no_grad()
     def _ema_update(self, level: int, flat_input: torch.Tensor, codes: torch.Tensor):

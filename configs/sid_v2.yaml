@@ -22,9 +22,13 @@ trainer:
 model:
   class_path: SIDTokenizerModel
   init_args:
-    # latent / codebook — multi-resolution (PLUM 패턴)
-    latent_dim: 384                # 256 → 384
-    codebook_sizes: [2048, 1024, 512]   # total ~ 1B unique SID combinations (1.4M items에 충분)
+    # latent / codebook — PLUM SIDv2 표준 multi-resolution
+    # v3 (1024×512×256, 130M 조합) 에서 uniqueness 0.71 에서 saturation 발생
+    # (lvl0 utilization 89%까지 잘 활용됐으나 codebook capacity 자체 한계).
+    # PLUM 표준 크기로 복귀: 2048×1024×512 = ~1B 조합 (1.4M items 에 충분 여유).
+    # v3 에서 검증된 data init + dead code restart 가 큰 codebook collapse 도 방지할 것.
+    latent_dim: 384
+    codebook_sizes: [2048, 1024, 512]   # ~1B unique SID combinations
     # content
     text_dim: 512
     image_dim: 0
@@ -43,7 +47,7 @@ model:
     decoder_hidden: [384, 768]
     dropout: 0.1
     commitment_cost: 0.25
-    ema_decay: 0.99
+    ema_decay: 0.95              # 0.99 → 0.95 (더 빠른 codebook 적응)
     # optim + cosine schedule
     lr: 0.001
     weight_decay: 0.0
@@ -57,8 +61,8 @@ data:
     num_pairs_per_user: 8         # 4 → 8
     max_train_pairs: 20_000_000   # 5M → 20M (PoC 적정)
     num_price_buckets: 10
-    batch_size: 8192              # 4096 → 8192
-    test_batch_size: 4096
+    batch_size: 16384             # 8192 → 16384 (k-means init 품질 + 속도)
+    test_batch_size: 8192
     num_workers: 4
     seed: 42
 

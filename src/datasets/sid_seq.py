@@ -148,7 +148,13 @@ class TIGERLiteDataModule(L.LightningDataModule):
         samples: List[Dict[str, np.ndarray]] = []
         rng = np.random.default_rng(self.hparams.seed)
 
+        n_users = all_df["user_code"].nunique()
+        print(f"[build_samples] augment={augment} rows={len(all_df):,} users={n_users:,} — 시작", flush=True)
+        _ui = 0
         for uc, g in all_df.groupby("user_code", sort=False):
+            _ui += 1
+            if _ui % 300_000 == 0:
+                print(f"[build_samples]   {_ui:,}/{n_users:,} users, samples={len(samples):,}", flush=True)
             snos = g["goods_sno"].tolist()[-self.hparams.max_user_history:]
             evs = g["event"].tolist()[-self.hparams.max_user_history:]
             if len(snos) < self.hparams.min_history_items + 1:
@@ -200,6 +206,7 @@ class TIGERLiteDataModule(L.LightningDataModule):
                     "dec_pos": dec_pos,
                     "target_behavior": BEHAVIOR_TO_ID.get(target_event, 0),
                 })
+        print(f"[build_samples] augment={augment} 완료 — samples={len(samples):,}", flush=True)
         return samples
 
     def train_dataloader(self):
