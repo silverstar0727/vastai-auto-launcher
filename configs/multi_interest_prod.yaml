@@ -69,6 +69,8 @@ data:
     use_rank_learning: false
     # test cap — production 그대로
     max_test_samples: 200_000
+    # production 데이터 크기 정합 — eligible user 1.13M 으로 cap (sampling)
+    max_eligible_users: 1_128_409
     # 시드
     dataloader_random_seed: 0
     seed: 42

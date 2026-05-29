@@ -3,8 +3,9 @@
 ably-reco production (`aws_code/reco_lib/reco_common/preprocess/default_raw_df_loader.py`)
 의 전처리 흐름을 v2_full parquet 에 그대로 적용:
 
-  0. Raw interactions 로드 (train+val+test 121 일 전부 결합 — production 도 단일
-     pool 에서 leave-last-out 으로 분할하므로 시간 분할 미적용).
+  0. Raw interactions 로드 (**train + val** = 105일 결합. test 16일은 봉인 →
+     task #18 의 최종 비교 평가에서만 사용). production 의 1년치 학습 pool 흐름
+     을 우리 보유 데이터(train+val) 한도 내에서 재현.
   1. on_sale 필터 (proxy: active_items.parquet 의 goods_sno).
   2. filter_short_seq(min_actions_per_user, count_unique=False) — 1st pass.
   2.5 preference_per_click 비율 필터 (suspicious item 제외).
@@ -106,6 +107,9 @@ class MultiInterestProdDataModule(L.LightningDataModule):
         use_rank_learning: bool = False,
         # test cap (production max_test_samples=200000)
         max_test_samples: int = 200_000,
+        # production 데이터 크기 정합 — 필터 후 eligible user 가 이 값을 초과하면 sampling 으로 downsize
+        # production 운영 로그: 1,128,409 users
+        max_eligible_users: int = 1_128_409,
         # 시드
         dataloader_random_seed: int = 0,
         seed: int = 42,
@@ -132,12 +136,12 @@ class MultiInterestProdDataModule(L.LightningDataModule):
         base = Path(hp.base_dir)
 
         # =========================================================
-        # 0. interactions 전체 (train+val+test = 121 일) 결합 streaming
+        # 0. interactions train+val = 105 일 결합 (test 16일은 봉인 → task #18)
         # =========================================================
         all_files = []
-        for split_dir in ["train", "val", "test"]:
+        for split_dir in ["train", "val"]:
             all_files += sorted((base / "interactions" / split_dir).glob("*.parquet"))
-        print(f"[MI-prod] interaction files: {len(all_files)} (train+val+test 121일 결합)", flush=True)
+        print(f"[MI-prod] interaction files: {len(all_files)} (train+val 105일 결합, test 봉인)", flush=True)
 
         # ---- Pass A: item popularity (goods_sno 만 읽음) + event 통계 (pref/click 필터용)
         item_counter: Counter = Counter()
@@ -263,6 +267,30 @@ class MultiInterestProdDataModule(L.LightningDataModule):
             f"{len(eligible_user_codes):,} / {total_pre:,}",
             flush=True,
         )
+
+        # =========================================================
+        # 데이터 크기 정합 — production user 수에 맞춰 downsize (필요 시)
+        # =========================================================
+        if len(eligible_user_codes) > hp.max_eligible_users:
+            sel = rng.choice(
+                len(eligible_user_codes), size=hp.max_eligible_users, replace=False
+            )
+            sel = sorted(sel.tolist())
+            user_train_items = [user_train_items[i] for i in sel]
+            user_train_events = [user_train_events[i] for i in sel]
+            user_test_items = [user_test_items[i] for i in sel]
+            eligible_user_codes = [eligible_user_codes[i] for i in sel]
+            print(
+                f"[MI-prod] downsized to production user count: "
+                f"{len(eligible_user_codes):,} (target={hp.max_eligible_users:,})",
+                flush=True,
+            )
+        else:
+            print(
+                f"[MI-prod] eligible {len(eligible_user_codes):,} ≤ "
+                f"target {hp.max_eligible_users:,} → 전체 사용",
+                flush=True,
+            )
 
         # =========================================================
         # test sample cap — production max_test_samples (예: 200,000)
