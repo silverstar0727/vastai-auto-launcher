@@ -71,8 +71,8 @@ data:
     max_test_samples: 200_000
     # production 데이터 크기 정합 — eligible user 1.13M 으로 cap (sampling)
     max_eligible_users: 1_128_409
-    # 학습 윈도우 — train+val 105일 pool 중 최근 N 일 사용 (production ~60일 대비 보수적)
-    last_n_days: 45
+    # 학습 윈도우 — production 그대로 60일
+    last_n_days: 60
     # 시드
     dataloader_random_seed: 0
     seed: 42
