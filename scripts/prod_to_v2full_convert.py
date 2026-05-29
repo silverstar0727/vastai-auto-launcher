@@ -37,24 +37,12 @@ import numpy as np
 import pandas as pd
 
 
-# prod CSV 의 event vocab (reco_common.util.constant.constants.EVENT_VOCA)
-PROD_EVENT_VOCA = {
-    "unknown": 0,
-    "click": 1,
-    "preference": 2,
-    "query": 3,
-    "search_click": 4,
-    "search_preference": 5,
-}
-# v2_full event 문자열 (우리 v2_full 의 interactions/*.parquet 에서 사용되는 값)
-# prod 의 integer code 를 v2_full 의 4-종 event 문자열로 inverse-map
-PROD_CODE_TO_V2FULL = {
-    1: "click",       # click → click
-    2: "purchase",    # preference → purchase (like/cart/order 등 통합)
-    4: "click",       # search_click → click (search context 는 row 보존)
-    5: "purchase",    # search_preference → purchase
-    # 0 (unknown), 3 (query) 는 학습 제외 (drop)
-}
+# prod CSV schema (확인됨, 2026-02-15 기준):
+#   USER_ID,ITEM_ID,TIMESTAMP,EVENT_TYPE
+#   m10000788,34546068,1768880444,click
+# EVENT_TYPE 은 string: click, like, cart, (purchase 는 order.csv 별도)
+# 우리 v2_full schema 의 event 값과 동일 → mapping 불필요. 그대로 사용.
+V2FULL_EVENTS = {"click", "like", "cart", "purchase"}
 
 
 def convert_interactions(
@@ -71,41 +59,50 @@ def convert_interactions(
     Multi-Interest prod 학습은 DataModule 이 train+val 결합 후 leave-last-out → val 도 학습에 포함.
     TIGER-lite v7 학습은 train_days/val_days config 기준 분할 사용.
     """
-    csv_files = sorted(prod_interaction_dir.glob("part-*.csv"))
+    # prod 는 단일 거대 CSV (18.5GB). pyarrow 기반 chunk 처리.
+    csv_files = sorted(prod_interaction_dir.glob("*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"prod interaction CSV 없음: {prod_interaction_dir}")
     print(f"[convert] interaction CSV 파일: {len(csv_files)}", flush=True)
 
-    dfs = []
+    # pyarrow streaming read 로 메모리 효율 ↑ (18.5GB 단일 file)
+    import pyarrow.csv as pacsv
+
+    chunks = []
     for f in csv_files:
-        df = pd.read_csv(f, header=None, low_memory=False)
-        dfs.append(df)
-    df = pd.concat(dfs, ignore_index=True)
+        print(f"[convert] reading {f.name} ({f.stat().st_size/1e9:.2f}GB)", flush=True)
+        # header 있음, 4 cols: USER_ID, ITEM_ID, TIMESTAMP, EVENT_TYPE
+        table = pacsv.read_csv(
+            str(f),
+            read_options=pacsv.ReadOptions(use_threads=True),
+            parse_options=pacsv.ParseOptions(delimiter=","),
+            convert_options=pacsv.ConvertOptions(
+                column_types={
+                    "USER_ID": "string",
+                    "ITEM_ID": "int64",
+                    "TIMESTAMP": "int64",
+                    "EVENT_TYPE": "string",
+                },
+            ),
+        )
+        chunks.append(table.to_pandas())
+    df = pd.concat(chunks, ignore_index=True) if len(chunks) > 1 else chunks[0]
+    del chunks
     print(f"[convert] raw interactions: {len(df):,}", flush=True)
 
-    # prod CSV schema (header 없음): user_id, item_id, event_code, ts + 가능한 추가 컬럼
-    if df.shape[1] >= 4:
-        df.columns = ["user_id", "item_id", "event_code", "ts"] + [
-            f"col_{i}" for i in range(df.shape[1] - 4)
-        ]
-    else:
-        raise ValueError(f"예상 못 한 prod CSV column 수: {df.shape[1]}")
-
-    df["item_id"] = pd.to_numeric(df["item_id"], errors="coerce")
-    df["event_code"] = pd.to_numeric(df["event_code"], errors="coerce")
-    df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
-    df = df.dropna(subset=["user_id", "item_id", "event_code", "ts"])
-    df["item_id"] = df["item_id"].astype("int64")
-    df["event_code"] = df["event_code"].astype("int64")
+    # rename + filter
+    df = df.rename(
+        columns={"USER_ID": "user_code", "ITEM_ID": "goods_sno",
+                 "TIMESTAMP": "ts", "EVENT_TYPE": "event"}
+    )
+    df = df.dropna(subset=["user_code", "goods_sno", "ts", "event"])
+    df["goods_sno"] = df["goods_sno"].astype("int64")
     df["ts"] = df["ts"].astype("int64")
+    # event 는 string 그대로 (v2_full 과 동일 vocab)
+    df = df[df["event"].isin(V2FULL_EVENTS)]
+    print(f"[convert] valid event 필터 후: {len(df):,}", flush=True)
 
-    df["event"] = df["event_code"].map(PROD_CODE_TO_V2FULL)
-    df = df.dropna(subset=["event"])  # query/unknown drop
-    print(f"[convert] event 매핑 후: {len(df):,}", flush=True)
-
-    out = df.rename(columns={"user_id": "user_code", "item_id": "goods_sno"})[
-        ["user_code", "goods_sno", "event", "ts"]
-    ]
+    out = df[["user_code", "goods_sno", "event", "ts"]]
 
     # 시간 기준 train/val 분할 — ts quantile 사용
     val_ratio = val_days / 60.0   # prod 60일 가정
