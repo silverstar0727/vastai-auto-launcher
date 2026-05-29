@@ -161,6 +161,20 @@ case "$MODEL" in
         ;;
 esac
 
+if [ "${DRY_RUN:-0}" = "1" ]; then
+    log "[5/5] DRY_RUN=1 → 학습 SKIP. 다운로드/변환 결과 검증:"
+    if [ -d "$DATA_ROOT/v2_full_prod" ]; then
+        log "  $DATA_ROOT/v2_full_prod/ tree (depth 2):"
+        find "$DATA_ROOT/v2_full_prod" -maxdepth 2 -type f -exec ls -la {} \; | head -30
+    fi
+    if [ -d "$DATA_ROOT/prod_1yr" ]; then
+        log "  $DATA_ROOT/prod_1yr/ size:"
+        du -sh "$DATA_ROOT/prod_1yr"/* 2>/dev/null | head
+    fi
+    log "DRY_RUN 종료 (학습 진입 안 함)"
+    exit 0
+fi
+
 log "[5/5] 학습 시작"
 
 # PoC v2_full prod 학습은 MODEL 별로 다단계 pipeline 일 수 있음.
@@ -218,13 +232,50 @@ case "$MODEL" in
         ;;
 esac
 
-# 학습 완료 후 S3 업로드 (S3_OUTPUT_PATH 가 지정된 경우)
-if [ -n "${S3_OUTPUT_PATH:-}" ]; then
-    log "산출물 S3 업로드: /workspace/logs/ + $DATA_ROOT/v2_full_prod/meta* → $S3_OUTPUT_PATH"
-    aws s3 sync /workspace/logs/ "$S3_OUTPUT_PATH/logs/" --no-progress || true
-    for meta_dir in "$DATA_ROOT/v2_full_prod"/meta*; do
-        [ -d "$meta_dir" ] && aws s3 sync "$meta_dir" "$S3_OUTPUT_PATH/$(basename $meta_dir)/" --no-progress
-    done
-fi
+# ---- 6) Test (validate with best ckpt) 자동 실행 ----
+# 학습 종료 후 best ckpt 로 val_dataloader 한 번 더 평가 → "최종 best ckpt 의 평가 수치".
+# Lightning 의 `validate` subcommand 는 test_step 정의 없이도 작동
+# (모든 우리 모델은 validation_step 정의됨).
+# 결과는 wandb val/* metric 으로 기록 (last epoch 가 아닌 best ckpt 기준).
+run_eval() {
+    local cfg_path="$1"
+    local ckpt_glob="$2"
+    local best_ckpt
+    best_ckpt=$(ls -t $ckpt_glob 2>/dev/null | head -1)
+    if [ -n "$best_ckpt" ]; then
+        log "[eval] $(basename $cfg_path) — best ckpt: $best_ckpt"
+        python src/main.py validate -c "$cfg_path" --ckpt_path "$best_ckpt" "${EXTRA_OVERRIDES[@]}" || \
+            log "[eval] WARN: 평가 실패 (계속 진행)"
+    else
+        log "[eval] WARN: best ckpt 없음 ($ckpt_glob) — 평가 SKIP"
+    fi
+}
 
-log "학습 종료 (exit code: 0)"
+case "$MODEL" in
+    multi_interest_prod)
+        run_eval configs/multi_interest_prod.yaml \
+            "/workspace/logs/multi_interest/*/fit/checkpoints/best_acc_model*.ckpt"
+        ;;
+    sid_v2_v3_prod)
+        run_eval configs/sid_v2_v3.yaml \
+            "/workspace/logs/sid_v2/*/fit/checkpoints/best_sid_tokenizer_v3*.ckpt"
+        ;;
+    hstu_two_tower_prod)
+        run_eval configs/hstu_two_tower.yaml \
+            "/workspace/logs/hstu_two_tower/*/fit/checkpoints/*.ckpt"
+        ;;
+    sid_v2_letter_prod)
+        run_eval configs/sid_v2_letter.yaml \
+            "/workspace/logs/sid_v2/*/fit/checkpoints/best_sid_tokenizer_letter*.ckpt"
+        ;;
+    tiger_lite_v7_prod)
+        run_eval configs/tiger_lite_v7.yaml \
+            "/workspace/logs/tiger_lite/*/fit/checkpoints/best_tiger_lite_v7*.ckpt"
+        ;;
+    tiger_lite_letter_prod)
+        run_eval configs/tiger_lite_v7_letter.yaml \
+            "/workspace/logs/tiger_lite/*/fit/checkpoints/best_tiger_lite_v7_letter*.ckpt"
+        ;;
+esac
+
+log "학습 + 평가 종료 (exit code: 0)"
