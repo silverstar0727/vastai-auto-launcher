@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import random
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -165,56 +166,95 @@ class MultiInterestV2DataModule(L.LightningDataModule):
 
         hp = self.hparams
         base = Path(hp.base_dir)
-
-        # 1) train interactions
         train_files = sorted((base / "interactions" / "train").glob("*.parquet"))[-hp.train_days:]
         logger.info(f"[MI-v2] train files: {len(train_files)} (last {hp.train_days} days)")
-        train_df = self._load_interactions(train_files)
-        logger.info(f"[MI-v2] train rows raw: {len(train_df):,}")
 
-        # 2) item universe — popular top-N from train
-        item_freq = train_df["goods_sno"].value_counts()
-        top_items = item_freq.head(hp.max_items).index.to_numpy()
-        item_set = set(int(s) for s in top_items)
-        sorted_top = np.sort(top_items)
-        self._sno_to_idx = {int(s): i + 1 for i, s in enumerate(sorted_top)}  # 0 = PAD
-        self.num_items = len(sorted_top) + 1
-        logger.info(f"[MI-v2] item universe: {len(sorted_top):,} (PAD=0, idx=1..{self.num_items-1})")
+        # === Pass 1: item popularity (file-by-file streaming) ===
+        # 21GB train 데이터를 한 번에 올리면 OOM → 파일별 처리.
+        item_counter: Counter = Counter()
+        for i, f in enumerate(train_files):
+            df = pd.read_parquet(f, columns=["goods_sno"])
+            df["goods_sno"] = pd.to_numeric(df["goods_sno"], errors="coerce")
+            df = df.dropna(subset=["goods_sno"])
+            item_counter.update(df["goods_sno"].astype("int64").to_numpy().tolist())
+            if (i + 1) % 10 == 0 or i == len(train_files) - 1:
+                logger.info(
+                    f"[MI-v2] pass1 item-count {i+1}/{len(train_files)} — "
+                    f"unique items so far: {len(item_counter):,}"
+                )
+            del df
 
-        # 3) item → standard_category 매핑
+        # top-N popular items → contiguous index (1..N, 0=PAD)
+        top_items = sorted(s for s, _ in item_counter.most_common(hp.max_items))
+        item_set = set(top_items)
+        self._sno_to_idx = {int(s): i + 1 for i, s in enumerate(top_items)}
+        self.num_items = len(top_items) + 1
+        logger.info(f"[MI-v2] item universe: {len(top_items):,} (PAD=0, idx=1..{self.num_items-1})")
+        del item_counter
+
+        # category 매핑 (item_meta.parquet — 작음)
         self._build_category_mapping(base / "meta" / "item_meta.parquet")
 
-        # 4) train data → per-user arrays
-        train_df = train_df[train_df["goods_sno"].isin(item_set)].copy()
-        train_df["event_code"] = (
-            train_df["event"].map(EVENT_MAP).map(EVENT_VOCA).fillna(0).astype("int64")
-        )
-        train_df["item_idx"] = train_df["goods_sno"].map(self._sno_to_idx).astype("int64")
-        train_df = train_df.sort_values(["user_code", "ts"], kind="stable")
+        # === Pass 2: per-user accumulation (file-by-file) ===
+        # user_code → list[item_idx]. 비 eligible 까지 일단 받고 끝에서 필터.
+        user_items: Dict[int, list] = {}
+        user_events: Dict[int, list] = {}
+        for i, f in enumerate(train_files):
+            df = pd.read_parquet(
+                f, columns=["user_code", "goods_sno", "event", "ts"]
+            ).dropna()
+            df["goods_sno"] = pd.to_numeric(df["goods_sno"], errors="coerce")
+            df["user_code"] = pd.to_numeric(df["user_code"], errors="coerce")
+            df = df.dropna(subset=["goods_sno", "user_code"])
+            df["goods_sno"] = df["goods_sno"].astype("int64")
+            df["user_code"] = df["user_code"].astype("int64")
+            df = df[df["goods_sno"].isin(item_set)]
+            if len(df) == 0:
+                del df
+                continue
+            df["event_code"] = (
+                df["event"].map(EVENT_MAP).map(EVENT_VOCA).fillna(0).astype("int64")
+            )
+            df["item_idx"] = df["goods_sno"].map(self._sno_to_idx).astype("int64")
+            df = df.sort_values(["user_code", "ts"], kind="stable")
 
-        user_counts = train_df.groupby("user_code").size()
-        eligible_users = user_counts[user_counts >= hp.min_actions_per_user].index
-        train_df = train_df[train_df["user_code"].isin(eligible_users)]
-        logger.info(
-            f"[MI-v2] eligible users (≥{hp.min_actions_per_user} actions): {len(eligible_users):,}, "
-            f"filtered rows: {len(train_df):,}"
-        )
+            for uc, g in df.groupby("user_code", sort=False):
+                uc_int = int(uc)
+                items_l = user_items.get(uc_int)
+                if items_l is None:
+                    user_items[uc_int] = g["item_idx"].tolist()
+                    user_events[uc_int] = g["event_code"].tolist()
+                else:
+                    items_l.extend(g["item_idx"].tolist())
+                    user_events[uc_int].extend(g["event_code"].tolist())
+            if (i + 1) % 5 == 0 or i == len(train_files) - 1:
+                logger.info(
+                    f"[MI-v2] pass2 per-user accum {i+1}/{len(train_files)} — "
+                    f"users so far: {len(user_items):,}"
+                )
+            del df
 
+        # eligible 필터 + numpy 변환
         user_train_items: List[np.ndarray] = []
         user_train_events: List[np.ndarray] = []
         eligible_user_codes: List[int] = []
-        _ui = 0
-        for uc, g in train_df.groupby("user_code", sort=False):
-            user_train_items.append(g["item_idx"].to_numpy(dtype=np.int64))
-            user_train_events.append(g["event_code"].to_numpy(dtype=np.int64))
-            eligible_user_codes.append(int(uc))
-            _ui += 1
-            if _ui % 200_000 == 0:
-                logger.info(f"[MI-v2]   per-user array build {_ui:,}/{len(eligible_users):,}")
+        for uc in sorted(user_items.keys()):
+            items = user_items[uc]
+            if len(items) < hp.min_actions_per_user:
+                continue
+            user_train_items.append(np.asarray(items, dtype=np.int64))
+            user_train_events.append(np.asarray(user_events[uc], dtype=np.int64))
+            eligible_user_codes.append(uc)
+        total_pre = len(user_items)
+        del user_items, user_events
         user_to_idx = {uc: i for i, uc in enumerate(eligible_user_codes)}
+        logger.info(
+            f"[MI-v2] eligible users (≥{hp.min_actions_per_user} actions): "
+            f"{len(eligible_user_codes):,} / {total_pre:,}"
+        )
 
-        # 5) val / test positives (per user 첫 next-item)
-        val_positives = self._build_eval_positives(
+        # === val / test positives (streamed) ===
+        val_positives = self._build_eval_positives_streamed(
             base / "interactions" / "val",
             days=hp.val_days,
             item_set=item_set,
@@ -223,7 +263,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
             max_users=hp.max_val_samples,
             split_label="val",
         )
-        test_positives = self._build_eval_positives(
+        test_positives = self._build_eval_positives_streamed(
             base / "interactions" / "test",
             days=hp.test_days,
             item_set=item_set,
@@ -310,7 +350,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
             f"[MI-v2] standard categories: {self.num_standard_categories} (PAD=0)"
         )
 
-    def _build_eval_positives(
+    def _build_eval_positives_streamed(
         self,
         dir_path: Path,
         days: int,
@@ -320,27 +360,56 @@ class MultiInterestV2DataModule(L.LightningDataModule):
         max_users: Optional[int],
         split_label: str,
     ) -> List[np.ndarray]:
+        """Streaming: file-by-file 순회하며 user 별 **첫** next-item 만 저장.
+
+        파일이 일별·시간순이라 file order 보존하면 자연스럽게 chronological order.
+        같은 user 는 첫 발견된 item 만 유지 (이미 채워졌으면 skip).
+        """
         files = sorted(dir_path.glob("*.parquet"))[-days:]
-        df = self._load_interactions(files)
-        df = df[df["goods_sno"].isin(item_set)]
-        df["item_idx"] = df["goods_sno"].map(self._sno_to_idx).astype("int64")
-        df = df.sort_values(["user_code", "ts"], kind="stable")
+        first_item: Dict[int, int] = {}  # user_code → item_idx
+        for i, f in enumerate(files):
+            df = pd.read_parquet(
+                f, columns=["user_code", "goods_sno", "ts"]
+            ).dropna()
+            df["goods_sno"] = pd.to_numeric(df["goods_sno"], errors="coerce")
+            df["user_code"] = pd.to_numeric(df["user_code"], errors="coerce")
+            df = df.dropna(subset=["goods_sno", "user_code"])
+            df["goods_sno"] = df["goods_sno"].astype("int64")
+            df["user_code"] = df["user_code"].astype("int64")
+            df = df[df["goods_sno"].isin(item_set)]
+            if len(df) == 0:
+                del df
+                continue
+            df["item_idx"] = df["goods_sno"].map(self._sno_to_idx).astype("int64")
+            df = df.sort_values(["user_code", "ts"], kind="stable")
+            for uc, g in df.groupby("user_code", sort=False):
+                uc_int = int(uc)
+                if uc_int in user_to_idx and uc_int not in first_item:
+                    first_item[uc_int] = int(g["item_idx"].iloc[0])
+            del df
+            if (i + 1) % 3 == 0 or i == len(files) - 1:
+                logger.info(
+                    f"[MI-v2] {split_label} eval positives {i+1}/{len(files)} — "
+                    f"covered users: {len(first_item):,}"
+                )
 
         positives: List[np.ndarray] = [np.array([], dtype=np.int64) for _ in range(num_users)]
-        for uc, g in df.groupby("user_code", sort=False):
-            idx = user_to_idx.get(int(uc))
-            if idx is None:
-                continue
-            positives[idx] = np.array([int(g["item_idx"].iloc[0])], dtype=np.int64)
-
+        for uc, item_idx in first_item.items():
+            idx = user_to_idx.get(uc)
+            if idx is not None:
+                positives[idx] = np.array([item_idx], dtype=np.int64)
         non_empty = sum(1 for p in positives if len(p) > 0)
+
         if max_users is not None and non_empty > max_users:
             rng = np.random.default_rng(self.hparams.seed)
             non_empty_idxs = np.array(
                 [i for i, p in enumerate(positives) if len(p) > 0]
             )
             sel = set(rng.choice(non_empty_idxs, size=max_users, replace=False).tolist())
-            positives = [p if i in sel else np.array([], dtype=np.int64) for i, p in enumerate(positives)]
+            positives = [
+                p if i in sel else np.array([], dtype=np.int64)
+                for i, p in enumerate(positives)
+            ]
             non_empty = max_users
         logger.info(f"[MI-v2] {split_label} eligible users with positive: {non_empty:,}")
         return positives
