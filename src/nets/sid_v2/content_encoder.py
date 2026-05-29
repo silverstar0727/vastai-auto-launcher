@@ -38,6 +38,10 @@ class ContentEncoder(nn.Module):
         num_price_buckets: int = 0,
         price_emb_dim: int = 16,
         out_dim: int = 512,
+        # === v3 신규 (백워드 호환: 기본 0 → 미사용) ===
+        num_attribute_values: int = 0,   # value_sno vocab size (e.g., 968+2 for PAD/UNK)
+        attribute_emb_dim: int = 32,
+        max_attributes_per_item: int = 16,
     ):
         super().__init__()
         self.text_dim = text_dim
@@ -45,6 +49,8 @@ class ContentEncoder(nn.Module):
         self.num_categories = num_categories
         self.num_brands = num_brands
         self.num_price_buckets = num_price_buckets
+        self.num_attribute_values = num_attribute_values
+        self.max_attributes_per_item = max_attributes_per_item
 
         fused_dim = 0
         if text_dim > 0:
@@ -60,6 +66,12 @@ class ContentEncoder(nn.Module):
         if num_price_buckets > 0:
             self.price_emb = nn.Embedding(num_price_buckets + 1, price_emb_dim, padding_idx=0)
             fused_dim += price_emb_dim
+        if num_attribute_values > 0:
+            # multi-attribute: 각 item 은 N(<=max) 개 attribute value 가짐 → mean pooling
+            self.attribute_emb = nn.Embedding(
+                num_attribute_values + 1, attribute_emb_dim, padding_idx=0
+            )
+            fused_dim += attribute_emb_dim
 
         if fused_dim == 0:
             raise ValueError("ContentEncoder: at least one modality required")
@@ -79,6 +91,7 @@ class ContentEncoder(nn.Module):
         category_id: Optional[torch.Tensor] = None,
         brand_id: Optional[torch.Tensor] = None,
         price_bucket: Optional[torch.Tensor] = None,
+        attribute_ids: Optional[torch.Tensor] = None,  # (B, max_attributes) — PAD=0
     ) -> torch.Tensor:
         parts = []
         if self.text_dim > 0 and text_emb is not None:
@@ -91,6 +104,13 @@ class ContentEncoder(nn.Module):
             parts.append(self.brand_emb(brand_id))
         if self.num_price_buckets > 0 and price_bucket is not None:
             parts.append(self.price_emb(price_bucket))
+        if self.num_attribute_values > 0 and attribute_ids is not None:
+            # attribute_ids: (B, K) — PAD=0 인 위치는 padding_idx 로 0 벡터 자동 처리
+            attr_embs = self.attribute_emb(attribute_ids)  # (B, K, attr_dim)
+            mask = (attribute_ids != 0).float().unsqueeze(-1)  # (B, K, 1)
+            denom = mask.sum(dim=1).clamp(min=1.0)  # (B, 1) — 최소 1개
+            pooled = (attr_embs * mask).sum(dim=1) / denom  # (B, attr_dim) mean pooling
+            parts.append(pooled)
         if not parts:
             raise ValueError("ContentEncoder.forward: no inputs provided")
         fused = torch.cat(parts, dim=-1)

@@ -74,22 +74,29 @@ class SIDTokenizerModel(L.LightningModule):
         weight_decay: float = 0.0,
         warmup_epochs: int = 3,
         eta_min: float = 1e-5,
+        # === v3 신규 (백워드 호환: 0 → 미사용) ===
+        attribute_emb_dim: int = 32,
+        max_attributes_per_item: int = 16,
+        aux_category_weight: float = 0.0,    # 0 → aux head 미사용
     ):
         super().__init__()
         self.save_hyperparameters()
         # net은 setup()에서 DataModule로부터 vocab 크기 받아 초기화
         self.encoder: Optional[ContentEncoder] = None
         self.vae: Optional[RQVAE] = None
+        self.aux_cat_head = None  # v3: encoder output → category 분류 head
         # metrics
         self.train_recon = _LossAcc()
         self.train_vq = _LossAcc()
         self.train_co = _LossAcc()
+        self.train_aux = _LossAcc()
         self.val_recon = _LossAcc()
 
     def setup(self, stage: str):
         if self.encoder is not None:
             return
         dm = self.trainer.datamodule
+        num_attr = getattr(dm, "num_attribute_values", 0)
         self.encoder = ContentEncoder(
             text_dim=self.hparams.text_dim,
             image_dim=self.hparams.image_dim,
@@ -100,6 +107,9 @@ class SIDTokenizerModel(L.LightningModule):
             num_price_buckets=self.hparams.num_price_buckets,
             price_emb_dim=self.hparams.price_emb_dim,
             out_dim=self.hparams.content_out_dim,
+            num_attribute_values=num_attr,
+            attribute_emb_dim=self.hparams.attribute_emb_dim,
+            max_attributes_per_item=self.hparams.max_attributes_per_item,
         )
         self.vae = RQVAE(
             input_dim=self.hparams.content_out_dim,
@@ -111,6 +121,12 @@ class SIDTokenizerModel(L.LightningModule):
             commitment_cost=self.hparams.commitment_cost,
             ema_decay=self.hparams.ema_decay,
         )
+        # v3: aux category head (regularize encoder latent to be category-coherent)
+        if self.hparams.aux_category_weight > 0 and dm.num_categories > 0:
+            import torch.nn as nn
+            self.aux_cat_head = nn.Linear(
+                self.hparams.content_out_dim, dm.num_categories
+            )
 
     def _encode_batch(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         return self.encoder(
@@ -119,6 +135,7 @@ class SIDTokenizerModel(L.LightningModule):
             category_id=batch.get("category_id"),
             brand_id=batch.get("brand_id"),
             price_bucket=batch.get("price_bucket"),
+            attribute_ids=batch.get("attribute_ids"),
         )
 
     def training_step(self, batch, batch_idx):
@@ -142,10 +159,25 @@ class SIDTokenizerModel(L.LightningModule):
         # 3) co-occurrence on quantized
         co = co_occurrence_loss(out_a["q"], out_p["q"], temperature=self.hparams.co_temperature)
 
+        # v3: aux category head — anchor & positive 의 encoder output 으로 category 분류
+        aux_loss = torch.zeros((), device=anchor_x.device)
+        if self.aux_cat_head is not None:
+            cat_a = batch["anchor"].get("category_id")
+            cat_p = batch["positive"].get("category_id")
+            if cat_a is not None and cat_p is not None:
+                logits_a = self.aux_cat_head(anchor_x)
+                logits_p = self.aux_cat_head(positive_x)
+                aux_loss = (
+                    F.cross_entropy(logits_a, cat_a, ignore_index=0)
+                    + F.cross_entropy(logits_p, cat_p, ignore_index=0)
+                ) * 0.5
+                self.train_aux(aux_loss)
+
         loss = (
             self.hparams.recon_weight * recon
             + self.hparams.vq_weight * vq
             + self.hparams.co_weight * co
+            + self.hparams.aux_category_weight * aux_loss
         )
         self.train_recon(recon)
         self.train_vq(vq)
@@ -156,6 +188,9 @@ class SIDTokenizerModel(L.LightningModule):
         self.log("train/recon", self.train_recon.compute(), prog_bar=True)
         self.log("train/vq", self.train_vq.compute(), prog_bar=False)
         self.log("train/co", self.train_co.compute(), prog_bar=True)
+        if self.aux_cat_head is not None:
+            self.log("train/aux_cat", self.train_aux.compute(), prog_bar=False)
+            self.train_aux.reset()
         self.train_recon.reset()
         self.train_vq.reset()
         self.train_co.reset()

@@ -63,6 +63,9 @@ class _ItemFeatureStore:
         category_sno_to_idx: Dict[int, int],
         brand_sno_to_idx: Optional[Dict[int, int]] = None,
         num_price_buckets: int = 10,
+        # === v3 신규 (백워드 호환: None → 기존 동작) ===
+        attribute_lookup: Optional[Dict[int, np.ndarray]] = None,
+        max_attributes_per_item: int = 16,
     ):
         self.text_emb = text_emb  # (N, D) fp16/32
         self.text_emb_index = text_emb_index  # goods_sno → row in text_emb
@@ -70,6 +73,8 @@ class _ItemFeatureStore:
         self.category_sno_to_idx = category_sno_to_idx
         self.brand_sno_to_idx = brand_sno_to_idx or {}
         self.num_price_buckets = num_price_buckets
+        self.attribute_lookup = attribute_lookup
+        self.max_attributes_per_item = max_attributes_per_item
 
         item_meta_df = item_meta_df.copy()
         cat_series = pd.to_numeric(item_meta_df["standard_category_sno"], errors="coerce")
@@ -99,6 +104,17 @@ class _ItemFeatureStore:
         price_buckets = _price_bucket(item_meta_df["price"], num_price_buckets)
         self.price_bucket = price_buckets.values.astype(np.int64)
 
+    def _attribute_tensor(self, goods_sno: int) -> torch.Tensor:
+        """attribute_ids: (max_attributes_per_item,) — left/right padding 무관, PAD=0."""
+        out = np.zeros(self.max_attributes_per_item, dtype=np.int64)
+        if self.attribute_lookup is None:
+            return torch.from_numpy(out)
+        arr = self.attribute_lookup.get(int(goods_sno))
+        if arr is not None and len(arr) > 0:
+            k = min(len(arr), self.max_attributes_per_item)
+            out[:k] = arr[:k]
+        return torch.from_numpy(out)
+
     def get(self, goods_sno: int) -> Dict[str, torch.Tensor]:
         i = self.goods_index.get(int(goods_sno))
         if i is None:
@@ -109,6 +125,7 @@ class _ItemFeatureStore:
                 "category_id": torch.tensor(UNK_IDX, dtype=torch.long),
                 "brand_id": torch.tensor(UNK_IDX, dtype=torch.long),
                 "price_bucket": torch.tensor(UNK_IDX, dtype=torch.long),
+                "attribute_ids": self._attribute_tensor(goods_sno),
             }
         text_row = self.text_emb_index.get(int(goods_sno))
         text = (
@@ -121,6 +138,7 @@ class _ItemFeatureStore:
             "category_id": torch.tensor(self.category_id[i], dtype=torch.long),
             "brand_id": torch.tensor(self.brand_id[i], dtype=torch.long),
             "price_bucket": torch.tensor(self.price_bucket[i], dtype=torch.long),
+            "attribute_ids": self._attribute_tensor(goods_sno),
         }
 
 
@@ -169,6 +187,10 @@ class SIDTokenizerDataModule(L.LightningDataModule):
         test_batch_size: int = 2048,
         num_workers: int = 4,
         seed: int = 42,
+        # === v3 신규 (백워드 호환: False → 기존 동작) ===
+        use_attributes: bool = False,
+        max_attributes_per_item: int = 16,
+        use_popularity_bias_pairs: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -176,6 +198,7 @@ class SIDTokenizerDataModule(L.LightningDataModule):
         self.store: Optional[_ItemFeatureStore] = None
         self.num_categories: int = 0
         self.num_brands: int = 0
+        self.num_attribute_values: int = 0  # 모델 setup() 이 읽음
 
     def prepare_data(self):
         # 외부 다운로드 등 없음
@@ -214,6 +237,30 @@ class SIDTokenizerDataModule(L.LightningDataModule):
         text_index_df["goods_sno"] = pd.to_numeric(text_index_df["goods_sno"], errors="coerce").astype("int64")
         text_emb_index = dict(zip(text_index_df["goods_sno"], text_index_df["row_idx"]))
 
+        # === v3: item_attributes 로드 (옵션) ===
+        attribute_lookup = None
+        if self.hparams.use_attributes:
+            attr_path = self.base / "meta" / "item_attributes.parquet"
+            ia = pd.read_parquet(attr_path, columns=["goods_sno", "value_sno"])
+            ia["goods_sno"] = pd.to_numeric(ia["goods_sno"], errors="coerce").astype("int64")
+            ia["value_sno"] = pd.to_numeric(ia["value_sno"], errors="coerce").astype("int64")
+            ia = ia.dropna()
+            # value_sno → contiguous index (1..N, 0=PAD)
+            unique_values = sorted(ia["value_sno"].unique().tolist())
+            value_to_idx = {int(v): i + 1 for i, v in enumerate(unique_values)}
+            self.num_attribute_values = len(unique_values) + 1
+            ia["value_idx"] = ia["value_sno"].map(value_to_idx).astype("int64")
+            # goods_sno → list[value_idx]
+            attribute_lookup = {}
+            for sno, g in ia.groupby("goods_sno", sort=False):
+                vals = g["value_idx"].to_numpy(dtype=np.int64)
+                attribute_lookup[int(sno)] = vals
+            print(
+                f"[SID-DM] attributes loaded — values={self.num_attribute_values}, "
+                f"items_covered={len(attribute_lookup):,}",
+                flush=True,
+            )
+
         self.store = _ItemFeatureStore(
             item_meta_df=meta,
             text_emb=text_emb,
@@ -221,6 +268,8 @@ class SIDTokenizerDataModule(L.LightningDataModule):
             category_sno_to_idx=cat_map,
             brand_sno_to_idx=brand_map,
             num_price_buckets=self.hparams.num_price_buckets,
+            attribute_lookup=attribute_lookup,
+            max_attributes_per_item=self.hparams.max_attributes_per_item,
         )
 
         # 학습/검증 분할
@@ -230,13 +279,28 @@ class SIDTokenizerDataModule(L.LightningDataModule):
         self._train_pairs = self._build_train_pairs()
 
     def _build_train_pairs(self) -> np.ndarray:
-        """train interactions 에서 (user, dt) 단위로 등장한 items 들끼리 sampling."""
+        """train interactions 에서 (user, dt) 단위로 등장한 items 들끼리 sampling.
+
+        v3: use_popularity_bias_pairs=True 면 pair 선택 시 item 빈도 역수 가중.
+        """
         rng = np.random.default_rng(self.hparams.seed)
         active_set = set(self.active_snos.tolist())
         train_dir = self.base / "interactions" / "train"
         files = sorted(train_dir.glob("*.parquet"))
         pairs: List[np.ndarray] = []
         target = self.hparams.max_train_pairs
+
+        # popularity bias: 전역 item 빈도 pre-pass
+        item_freq: Dict[int, int] = {}
+        if self.hparams.use_popularity_bias_pairs:
+            print("[SID-DM] popularity bias pair sampling — item freq pre-pass...", flush=True)
+            from collections import Counter
+            counter: Counter = Counter()
+            for fp in files:
+                df = pd.read_parquet(fp, columns=["goods_sno"])
+                counter.update(df["goods_sno"].astype("int64").to_numpy().tolist())
+            item_freq = dict(counter)
+            print(f"[SID-DM]   freq computed — {len(item_freq):,} unique items", flush=True)
         per_user = self.hparams.num_pairs_per_user
         for fp in files:
             if sum(len(p) for p in pairs) >= target:
@@ -251,9 +315,17 @@ class SIDTokenizerDataModule(L.LightningDataModule):
                 if len(items) < 2:
                     continue
                 arr = np.array(items, dtype=np.int64)
-                # per_user 만큼 random pair
                 k = min(per_user, len(arr) * (len(arr) - 1) // 2)
-                idxs = rng.integers(0, len(arr), size=(k, 2))
+                if self.hparams.use_popularity_bias_pairs and item_freq:
+                    # weight ∝ 1/√freq, Word2Vec-style negative sampling correction
+                    weights = np.array(
+                        [1.0 / np.sqrt(max(item_freq.get(int(x), 1), 1)) for x in arr],
+                        dtype=np.float64,
+                    )
+                    weights = weights / weights.sum()
+                    idxs = rng.choice(len(arr), size=(k, 2), p=weights)
+                else:
+                    idxs = rng.integers(0, len(arr), size=(k, 2))
                 idxs = idxs[idxs[:, 0] != idxs[:, 1]]
                 if len(idxs) == 0:
                     continue
