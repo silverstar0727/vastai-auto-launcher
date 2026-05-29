@@ -151,11 +151,80 @@ case "$MODEL" in
             "--data.init_args.model_path=$DATA_ROOT/output/$MODEL"
         )
         ;;
+    # ---- PoC v2_full production-matched 학습 (3종 + 부속) ----
+    # 다운로드 단계에서 prod CSV → v2_full schema parquet 변환이 끝난 상태.
+    # 학습 단계에선 base_dir 만 변환 디렉토리로 override.
+    multi_interest_prod|sid_v2_v3_prod|sid_v2_letter_prod|tiger_lite_v7_prod|tiger_lite_letter_prod|hstu_two_tower_prod)
+        EXTRA_OVERRIDES=(
+            "--data.init_args.base_dir=$DATA_ROOT/v2_full_prod"
+        )
+        ;;
 esac
 
-log "[5/5] 학습 시작: configs/${MODEL}.yaml"
+log "[5/5] 학습 시작"
 
-# 학습 명령. set -e 하에서 python 이 non-zero 로 죽어도 trap EXIT 이 발동돼
-# Pod self-terminate 가 호출되므로 K8s 재시작 루프에 빠지지 않는다.
-python src/main.py fit -c "$CONFIG" "${EXTRA_OVERRIDES[@]}" "$@"
+# PoC v2_full prod 학습은 MODEL 별로 다단계 pipeline 일 수 있음.
+# 각 stage 가 다음 stage 의 입력 (SID, CF emb 등) 을 생성.
+case "$MODEL" in
+    multi_interest_prod)
+        log "  [single-stage] Multi-Interest prod 학습"
+        python src/main.py fit -c configs/multi_interest_prod.yaml "${EXTRA_OVERRIDES[@]}" "$@"
+        ;;
+    sid_v2_v3_prod)
+        log "  [single-stage] SID Tokenizer v3 prod 학습"
+        python src/main.py fit -c configs/sid_v2_v3.yaml "${EXTRA_OVERRIDES[@]}" "$@"
+        ;;
+    hstu_two_tower_prod)
+        log "  [single-stage] HSTU two-tower prod 학습 (CF teacher)"
+        python src/main.py fit -c configs/hstu_two_tower.yaml "${EXTRA_OVERRIDES[@]}" "$@"
+        ;;
+    sid_v2_letter_prod)
+        log "  [single-stage] LETTER SID Tokenizer 학습 (HSTU CF emb 필요)"
+        python src/main.py fit -c configs/sid_v2_letter.yaml "${EXTRA_OVERRIDES[@]}" "$@"
+        ;;
+    tiger_lite_v7_prod)
+        # Pipeline: SID v3 → TIGER-lite v7
+        log "  [stage 1/2] SID Tokenizer v3 prod 학습"
+        python src/main.py fit -c configs/sid_v2_v3.yaml "${EXTRA_OVERRIDES[@]}"
+        log "  [stage 2/2] TIGER-lite v7 prod 학습 (meta_v3 SID 사용)"
+        python src/main.py fit -c configs/tiger_lite_v7.yaml "${EXTRA_OVERRIDES[@]}" "$@"
+        ;;
+    tiger_lite_letter_prod)
+        # Pipeline: HSTU → CF emb 추출 → LETTER SID → TIGER-lite LETTER
+        log "  [stage 1/4] HSTU two-tower prod 학습 (CF teacher)"
+        python src/main.py fit -c configs/hstu_two_tower.yaml "${EXTRA_OVERRIDES[@]}"
+        log "  [stage 2/4] CF embedding 추출 → meta/cf_embeddings.pt"
+        # HSTU ckpt 경로는 lightning convention 으로 logs/hstu_two_tower/.../checkpoints/
+        HSTU_CKPT=$(find /workspace/logs/hstu_two_tower -name "*.ckpt" -path "*/fit/checkpoints/*" 2>/dev/null | head -1)
+        # item_index 매핑은 hstu DataModule 이 저장한다고 가정 (없으면 fallback 으로 active item 순서)
+        ITEM_MAP="$DATA_ROOT/v2_full_prod/meta/item_index_map.parquet"
+        if [ -n "$HSTU_CKPT" ] && [ -f "$ITEM_MAP" ]; then
+            python "$DATA_ROOT/v2_full_prod/scripts/40_extract_cf_embeddings.py" \
+                --ckpt "$HSTU_CKPT" --model hstu_two_tower \
+                --item-mapping "$ITEM_MAP" \
+                --out "$DATA_ROOT/v2_full_prod/meta/cf_embeddings.pt"
+        else
+            log "WARN: HSTU ckpt 또는 item_index_map 없음 — CF emb 추출 SKIP (LETTER 학습 실패할 수 있음)"
+        fi
+        log "  [stage 3/4] LETTER SID Tokenizer 학습"
+        python src/main.py fit -c configs/sid_v2_letter.yaml "${EXTRA_OVERRIDES[@]}"
+        log "  [stage 4/4] TIGER-lite v7 LETTER 학습 (meta_v3_letter SID 사용)"
+        python src/main.py fit -c configs/tiger_lite_v7_letter.yaml "${EXTRA_OVERRIDES[@]}" "$@"
+        ;;
+    *)
+        # 기존 모델 (cbf/complement/multi_interest 등) — 단일 학습
+        log "  [legacy single-stage] configs/${MODEL}.yaml"
+        python src/main.py fit -c "$CONFIG" "${EXTRA_OVERRIDES[@]}" "$@"
+        ;;
+esac
+
+# 학습 완료 후 S3 업로드 (S3_OUTPUT_PATH 가 지정된 경우)
+if [ -n "${S3_OUTPUT_PATH:-}" ]; then
+    log "산출물 S3 업로드: /workspace/logs/ + $DATA_ROOT/v2_full_prod/meta* → $S3_OUTPUT_PATH"
+    aws s3 sync /workspace/logs/ "$S3_OUTPUT_PATH/logs/" --no-progress || true
+    for meta_dir in "$DATA_ROOT/v2_full_prod"/meta*; do
+        [ -d "$meta_dir" ] && aws s3 sync "$meta_dir" "$S3_OUTPUT_PATH/$(basename $meta_dir)/" --no-progress
+    done
+fi
+
 log "학습 종료 (exit code: 0)"
