@@ -1,0 +1,73 @@
+# TIGER-lite v7 — Order Position / Coverage·NDCG / pop-bias / max_history 통합
+#
+# 사용 SID: meta_v3/item_to_sid.parquet (sid_v2_v3.yaml 산출).
+# Multi-Interest 와 fair 비교: train_days 98, max_history 80, beam 50, val 5000 정합.
+# 본 config 는 LETTER SID 없이 v3 baseline 측정용.
+
+name: tiger_lite
+version: v7
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: 16-mixed
+  max_epochs: 30
+  deterministic: false
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  log_every_n_steps: 50
+  gradient_clip_val: 1.0
+
+model:
+  class_path: TIGERLiteModel
+  init_args:
+    dim: 512
+    n_enc_layers: 6
+    n_dec_layers: 6
+    n_heads: 8
+    ff_dim: 2048
+    max_seq_len: 800
+    dropout: 0.2
+    beam_width: 50               # B3. R@50 cap 해소 (32 → 50)
+    eval_ks: [10, 50]
+    lr: 0.002
+    weight_decay: 0.01
+    warmup_epochs: 3
+    eta_min: 0.00001
+    # === v7 신규 ===
+    max_order_positions: 200     # B1. 같은 ts → 같은 order pos. user 당 평균 50-100 events
+
+data:
+  class_path: TIGERLiteDataModule
+  init_args:
+    base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
+    codebook_sizes: [2048, 1024, 512, 164]
+    item_to_sid_path: meta_v3/item_to_sid.parquet   # ← v3 SID 사용
+    max_history_items: 80                            # B7. multi-interest 와 정합 (50 → 80)
+    min_history_items: 5
+    max_user_history: 500
+    augment_factor: 4
+    batch_size: 1024
+    eval_batch_size: 128
+    num_workers: 0
+    train_days: 98                                   # C1. multi-interest 와 정합 (14 → 98)
+    val_days: 7
+    test_days: 16
+    seed: 42
+    # === v7 신규 ===
+    use_order_pos: true                              # B1
+    use_popularity_bias_augment: true                # B4
+
+early_stopping:
+  monitor: val/Recall@10
+  patience: 5
+  mode: max
+
+model_ckpt:
+  monitor: val/Recall@10
+  mode: max
+  filename: "best_tiger_lite_v7"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1

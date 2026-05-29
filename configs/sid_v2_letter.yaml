@@ -27,12 +27,12 @@ trainer:
   callbacks:
     - class_path: SaveSIDMapCallback
       init_args:
-        output_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full/meta_letter
+        output_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full/meta_v3_letter
 
 model:
   class_path: SIDTokenizerLetterModel
   init_args:
-    # === sid_v2.yaml 와 동일 (RQ-VAE 인자) ===
+    # === sid_v2_v3 와 동일 (v3 개선 + LETTER) ===
     latent_dim: 384
     codebook_sizes: [2048, 1024, 512]
     text_dim: 512
@@ -44,7 +44,7 @@ model:
     content_out_dim: 512
     recon_weight: 1.0
     vq_weight: 1.0
-    co_weight: 0.0                # LETTER paper 그대로 가려면 0. 우리 SID v2 와 비교하려면 0.5 유지.
+    co_weight: 0.0                # LETTER L_CF 가 더 정교한 CF 신호 → co_occurrence 비활성
     co_temperature: 0.07
     encoder_hidden: [768, 384]
     decoder_hidden: [384, 768]
@@ -55,12 +55,16 @@ model:
     weight_decay: 0.0
     warmup_epochs: 3
     eta_min: 0.00001
-    # === LETTER 신규 인자 ===
-    cf_emb_dim: 64                # HSTU/SASRec teacher 차원 (스크립트로 추출 시 확정)
+    # === v3 개선 ===
+    attribute_emb_dim: 32
+    max_attributes_per_item: 16
+    aux_category_weight: 0.2
+    # === LETTER 신규 ===
+    cf_emb_dim: 64
     cf_weight: 0.02               # paper best α = 0.02
     div_weight: 0.0001            # paper best β ≈ 1e-4
-    div_clusters: 10              # paper default K = 10
-    div_recluster_every: 500      # paper 미명시 — 500 step 마다 K-means 재실행
+    div_clusters: 10
+    div_recluster_every: 500
 
 data:
   class_path: SIDTokenizerLetterDataModule
@@ -73,7 +77,12 @@ data:
     test_batch_size: 8192
     num_workers: 4
     seed: 42
-    cf_emb_path: meta/cf_embeddings.pt   # base_dir 기준 상대 경로 (절대 경로도 가능)
+    # === v3 개선 ===
+    use_attributes: true
+    max_attributes_per_item: 16
+    use_popularity_bias_pairs: true
+    # === LETTER 신규 ===
+    cf_emb_path: meta/cf_embeddings.pt
 
 early_stopping:
   monitor: val/sid_uniqueness
