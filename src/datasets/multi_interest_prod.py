@@ -110,6 +110,8 @@ class MultiInterestProdDataModule(L.LightningDataModule):
         # production 데이터 크기 정합 — 필터 후 eligible user 가 이 값을 초과하면 sampling 으로 downsize
         # production 운영 로그: 1,128,409 users
         max_eligible_users: int = 1_128_409,
+        # 학습 윈도우 — train+val pool 의 최근 N 일만 사용 (production ~60일 대비 보수적)
+        last_n_days: int = 45,
         # 시드
         dataloader_random_seed: int = 0,
         seed: int = 42,
@@ -136,12 +138,25 @@ class MultiInterestProdDataModule(L.LightningDataModule):
         base = Path(hp.base_dir)
 
         # =========================================================
-        # 0. interactions train+val = 105 일 결합 (test 16일은 봉인 → task #18)
+        # 0. interactions train+val pool 의 최근 N 일만 사용 (test 16일 봉인)
+        #    production 은 ~60일 (last_n_days). 우리도 last N 일을 chronological 순으로 잘라 사용.
         # =========================================================
-        all_files = []
+        pool = []
         for split_dir in ["train", "val"]:
-            all_files += sorted((base / "interactions" / split_dir).glob("*.parquet"))
-        print(f"[MI-prod] interaction files: {len(all_files)} (train+val 105일 결합, test 봉인)", flush=True)
+            pool += list((base / "interactions" / split_dir).glob("*.parquet"))
+        # 파일명이 YYYYMMDD.parquet 형식 → sort 가 곧 chronological order
+        pool = sorted(pool, key=lambda p: p.name)
+        all_files = pool[-hp.last_n_days:]
+        print(
+            f"[MI-prod] interaction files: {len(all_files)} "
+            f"(train+val pool {len(pool)}일 중 최근 {hp.last_n_days}일, test 봉인)",
+            flush=True,
+        )
+        if len(all_files) >= 1:
+            print(
+                f"[MI-prod]   range: {all_files[0].name} ~ {all_files[-1].name}",
+                flush=True,
+            )
 
         # ---- Pass A: item popularity (goods_sno 만 읽음) + event 통계 (pref/click 필터용)
         item_counter: Counter = Counter()
