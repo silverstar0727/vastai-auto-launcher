@@ -4,6 +4,7 @@ from . import complement
 from . import multi_interest
 from . import lightgcn
 from . import sid_tokenizer
+from . import sid_tokenizer_letter
 from . import hstu_two_tower
 from . import tiger_lite
 from . import tiger_lite_gemma

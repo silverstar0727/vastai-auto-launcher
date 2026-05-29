@@ -5,6 +5,7 @@ from . import multi_interest
 from . import multi_interest_v2
 from . import lightgcn
 from . import sid_tokenizer
+from . import sid_tokenizer_letter
 from . import hstu_seq
 from . import sid_seq
 from . import tiger_cpt

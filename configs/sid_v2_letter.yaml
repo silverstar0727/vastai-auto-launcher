@@ -1,0 +1,89 @@
+# LETTER variant of SID Tokenizer (Wang et al., CIKM 2024, arXiv:2405.07314)
+#
+# 기존 sid_v2.yaml 의 RQ-VAE 학습에 두 가지 정규화 추가:
+#   L_CF (collaborative): frozen CF teacher (HSTU/SASRec) embedding 을 InfoNCE distill
+#   L_Div (diversity):    codebook 을 constrained K-means 로 군집화 후 contrastive
+#
+# Prerequisite (LETTER 학습 전에 필요):
+#   1. HSTU two-tower 학습 (src/models/hstu_two_tower.py) 또는 SASRec 학습
+#   2. scripts/extract_cf_embeddings.py 로 item embedding 추출
+#      → /data/reco_experiments/v2_full/meta/cf_embeddings.pt 저장
+#
+# 본 config 는 sid_v2.yaml 와 별개. 기존 sid_v2 학습 경로 무변경.
+
+name: sid_v2_letter
+version: v1
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: 16-mixed
+  max_epochs: 50
+  deterministic: false
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  log_every_n_steps: 50
+  callbacks:
+    - class_path: SaveSIDMapCallback
+      init_args:
+        output_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full/meta_letter
+
+model:
+  class_path: SIDTokenizerLetterModel
+  init_args:
+    # === sid_v2.yaml 와 동일 (RQ-VAE 인자) ===
+    latent_dim: 384
+    codebook_sizes: [2048, 1024, 512]
+    text_dim: 512
+    image_dim: 0
+    cat_emb_dim: 64
+    brand_emb_dim: 48
+    num_price_buckets: 10
+    price_emb_dim: 16
+    content_out_dim: 512
+    recon_weight: 1.0
+    vq_weight: 1.0
+    co_weight: 0.0                # LETTER paper 그대로 가려면 0. 우리 SID v2 와 비교하려면 0.5 유지.
+    co_temperature: 0.07
+    encoder_hidden: [768, 384]
+    decoder_hidden: [384, 768]
+    dropout: 0.1
+    commitment_cost: 0.25
+    ema_decay: 0.95
+    lr: 0.001
+    weight_decay: 0.0
+    warmup_epochs: 3
+    eta_min: 0.00001
+    # === LETTER 신규 인자 ===
+    cf_emb_dim: 64                # HSTU/SASRec teacher 차원 (스크립트로 추출 시 확정)
+    cf_weight: 0.02               # paper best α = 0.02
+    div_weight: 0.0001            # paper best β ≈ 1e-4
+    div_clusters: 10              # paper default K = 10
+    div_recluster_every: 500      # paper 미명시 — 500 step 마다 K-means 재실행
+
+data:
+  class_path: SIDTokenizerLetterDataModule
+  init_args:
+    base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
+    num_pairs_per_user: 8
+    max_train_pairs: 20_000_000
+    num_price_buckets: 10
+    batch_size: 16384
+    test_batch_size: 8192
+    num_workers: 4
+    seed: 42
+    cf_emb_path: meta/cf_embeddings.pt   # base_dir 기준 상대 경로 (절대 경로도 가능)
+
+early_stopping:
+  monitor: val/sid_uniqueness
+  patience: 8
+  mode: max
+
+model_ckpt:
+  monitor: val/sid_uniqueness
+  mode: max
+  filename: "best_sid_tokenizer_letter"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1
