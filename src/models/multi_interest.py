@@ -73,6 +73,50 @@ class Accuracy(Metric):
         return scores
 
 
+class AccuracyMultiK(Metric):
+    """Recall@K · NDCG@K · Coverage@K for multiple K — TIGER 와 정합되는 metric.
+
+    paper-standard 입력 (full softmax scores 그대로) 을 받아, 각 K 별 top-K 추출 후
+    recall/ndcg 계산. Coverage 는 top-K 에 등장한 unique item 누적 (state 가 아닌
+    Python set, on_validation_epoch_end 에서 수동 reset 필요).
+    """
+
+    def __init__(self, top_ks=(10, 50), dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.top_ks = list(top_ks)
+        self.max_k = max(self.top_ks)
+        self.add_state("total", default=torch.tensor(0))
+        for k in self.top_ks:
+            self.add_state(f"NDCG_{k}", default=torch.tensor(0.0))
+            self.add_state(f"Recall_{k}", default=torch.tensor(0.0))
+        self._topk_items_seen = {k: set() for k in self.top_ks}
+
+    def update(self, batch_scores: torch.Tensor, batch_positive_items: torch.Tensor):
+        # 한 번에 max_k 까지 정렬 후 K 별 slice → 비용 절감
+        batch_rank_items = batch_scores.argsort(dim=1, descending=True)[:, : self.max_k]
+        metrics = recalls_and_ndcgs_for_ks(batch_rank_items, batch_positive_items, self.top_ks)
+        for k in self.top_ks:
+            getattr(self, f"NDCG_{k}").__iadd__(metrics[f"NDCG_{k}"])
+            getattr(self, f"Recall_{k}").__iadd__(metrics[f"Recall_{k}"])
+            # Coverage: top-k items
+            topk = batch_rank_items[:, :k].detach().cpu().numpy().reshape(-1).tolist()
+            self._topk_items_seen[k].update(topk)
+        self.total += 1
+
+    def compute(self, num_items: int = 0) -> dict:
+        out = {}
+        for k in self.top_ks:
+            out[f"Recall@{k}"] = getattr(self, f"Recall_{k}") / self.total.clamp(min=1)
+            out[f"NDCG@{k}"] = getattr(self, f"NDCG_{k}") / self.total.clamp(min=1)
+            if num_items > 0:
+                out[f"Coverage@{k}"] = len(self._topk_items_seen[k]) / num_items
+        return out
+
+    def reset_all(self):
+        super().reset()
+        self._topk_items_seen = {k: set() for k in self.top_ks}
+
+
 # --- Loss functions ---
 
 
@@ -154,7 +198,9 @@ class MultiInterestModel(L.LightningModule):
             self._item_train_weights = torch.FloatTensor(dm.item_train_weights)
 
         self.accuracy_metric = Accuracy(self.hparams.top_k)
-        self.std_accuracy_metric = Accuracy(50)  # 논문 표준 메트릭 @50
+        self.std_accuracy_metric = Accuracy(50)  # 논문 표준 메트릭 @50 (기존 호환)
+        # TIGER 와 정합되는 metric — paper-standard scores 에 대해 @10/@50 + Coverage
+        self.aligned_metric = AccuracyMultiK(top_ks=(10, 50))
         self.loss_acc = LossAccumulator()
 
     def on_train_start(self):
@@ -187,17 +233,19 @@ class MultiInterestModel(L.LightningModule):
     def validation_step(self, val_batch, batch_idx):
         input_dict, positive_items = val_batch
 
-        # 1) 서빙 로직 메트릭 (rank-weighted interest aggregation)
+        # 1) 서빙 로직 메트릭 (rank-weighted interest aggregation) — 기존 호환
         scores = self.compute_score(input_dict, remove_history=True)
         self.accuracy_metric.update(scores, positive_items)
 
-        # 2) 논문 표준 메트릭 (raw score, max over interests, history removal, full ranking)
+        # 2) 논문 표준 (raw score, max over interests, history removal, full ranking)
         out_dict = self.net(input_dict)
         raw_prediction = out_dict[ModelOutputKey.PREDICTION]  # [B, K, V]
         std_scores = raw_prediction.max(dim=1)[0]             # [B, V]
         history_items = input_dict[FeatureField.CLICK_ITEMS]   # [B, max_len]
         std_scores.scatter_(1, history_items, float("-inf"))
         self.std_accuracy_metric.update(std_scores, positive_items)
+        # TIGER 정합 metric — 같은 paper-standard scores 에 대해 multi-K + Coverage
+        self.aligned_metric.update(std_scores, positive_items)
 
     def compute_score(
         self,
@@ -274,15 +322,24 @@ class MultiInterestModel(L.LightningModule):
         return final_scores
 
     def on_validation_epoch_end(self):
-        # 서빙 로직 메트릭
+        # 서빙 로직 메트릭 (기존 호환)
         dict_ = self.accuracy_metric.compute()
         for k, v in dict_.items():
             self.log(f"val/{k}", v, prog_bar=True)
 
-        # 논문 표준 메트릭
+        # 논문 표준 메트릭 (기존 호환)
         std_dict = self.std_accuracy_metric.compute()
         for k, v in std_dict.items():
             self.log(f"val/std_{k}", v)
+
+        # TIGER 정합 metric: val/Recall@10, val/Recall@50, val/NDCG@10, val/NDCG@50, val/Coverage@K
+        dm = self.trainer.datamodule
+        num_items = getattr(dm, "num_items", 0)
+        aligned = self.aligned_metric.compute(num_items=num_items)
+        for k, v in aligned.items():
+            # Recall@10 은 prog_bar, 나머지는 그냥 로깅
+            self.log(f"val/{k}", v, prog_bar=(k == "Recall@10"))
+        self.aligned_metric.reset_all()
 
     def test_step(self, batch, batch_idx):
         return self.validation_step(batch, batch_idx)
