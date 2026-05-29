@@ -80,6 +80,7 @@ class _SIDSeqTrainDataset(Dataset):
             "enc_tokens": torch.from_numpy(s["enc_tokens"]),
             "enc_beh": torch.from_numpy(s["enc_beh"]),
             "enc_pos": torch.from_numpy(s["enc_pos"]),
+            "enc_order_pos": torch.from_numpy(s["enc_order_pos"]),
             "enc_mask": torch.from_numpy(s["enc_mask"]).bool(),
             "dec_input": torch.from_numpy(s["dec_input"]),
             "dec_target": torch.from_numpy(s["dec_target"]),
@@ -104,6 +105,10 @@ class TIGERLiteDataModule(L.LightningDataModule):
         val_days: int = 7,
         test_days: int = 16,
         seed: int = 42,
+        # === v7 신규 (백워드 호환: False → 기존 동작) ===
+        use_order_pos: bool = False,             # 같은 ts → 같은 order position (cart/outfit 신호)
+        use_popularity_bias_augment: bool = False,  # augment end position 을 inv-freq 가중 샘플링
+        item_to_sid_path: Optional[str] = None,  # None 이면 meta/item_to_sid.parquet 기본
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -111,6 +116,7 @@ class TIGERLiteDataModule(L.LightningDataModule):
         self.store: Optional[_SIDStore] = None
         self._train_samples = None
         self._val_samples = None
+        self._item_freq: Dict[int, int] = {}
 
     @property
     def num_behaviors(self):
@@ -123,12 +129,29 @@ class TIGERLiteDataModule(L.LightningDataModule):
     def setup(self, stage: Optional[str] = None):
         if self.store is not None:
             return
-        item_sid = pd.read_parquet(self.base / "meta" / "item_to_sid.parquet")
+        sid_path = (
+            Path(self.hparams.item_to_sid_path)
+            if self.hparams.item_to_sid_path
+            else self.base / "meta" / "item_to_sid.parquet"
+        )
+        item_sid = pd.read_parquet(sid_path)
         item_sid["goods_sno"] = pd.to_numeric(item_sid["goods_sno"], errors="coerce").astype("int64")
         self.store = _SIDStore(item_sid, tuple(self.hparams.codebook_sizes))
 
         train_files = sorted((self.base / "interactions" / "train").glob("*.parquet"))[-self.hparams.train_days:]
         val_files = sorted((self.base / "interactions" / "val").glob("*.parquet"))[-self.hparams.val_days:]
+
+        # v7: popularity bias 용 item 빈도 pre-pass
+        if self.hparams.use_popularity_bias_augment:
+            print("[TIGER-DM] popularity bias — item freq pre-pass...", flush=True)
+            from collections import Counter
+            counter: Counter = Counter()
+            for fp in train_files:
+                df = pd.read_parquet(fp, columns=["goods_sno"])
+                counter.update(df["goods_sno"].astype("int64").to_numpy().tolist())
+            self._item_freq = dict(counter)
+            print(f"[TIGER-DM]   freq: {len(self._item_freq):,} unique items", flush=True)
+
         self._train_samples = self._build_samples(train_files, augment=True)
         self._val_samples = self._build_samples(val_files, augment=False)
 
@@ -141,7 +164,10 @@ class TIGERLiteDataModule(L.LightningDataModule):
             return []
         all_df = pd.concat(rows, ignore_index=True).dropna()
         all_df["goods_sno"] = pd.to_numeric(all_df["goods_sno"], errors="coerce").astype("int64")
-        all_df = all_df.dropna(subset=["goods_sno"]).sort_values(["user_code", "ts"], kind="stable")
+        all_df["ts"] = pd.to_numeric(all_df["ts"], errors="coerce").astype("int64")
+        all_df = all_df.dropna(subset=["goods_sno", "ts"]).sort_values(
+            ["user_code", "ts"], kind="stable"
+        )
 
         L = self.store.L
         max_T_enc = self.hparams.max_history_items * L
@@ -149,7 +175,11 @@ class TIGERLiteDataModule(L.LightningDataModule):
         rng = np.random.default_rng(self.hparams.seed)
 
         n_users = all_df["user_code"].nunique()
-        print(f"[build_samples] augment={augment} rows={len(all_df):,} users={n_users:,} — 시작", flush=True)
+        print(
+            f"[build_samples] augment={augment} rows={len(all_df):,} users={n_users:,} "
+            f"order_pos={self.hparams.use_order_pos} pop_bias={self.hparams.use_popularity_bias_augment}",
+            flush=True,
+        )
         _ui = 0
         for uc, g in all_df.groupby("user_code", sort=False):
             _ui += 1
@@ -157,19 +187,48 @@ class TIGERLiteDataModule(L.LightningDataModule):
                 print(f"[build_samples]   {_ui:,}/{n_users:,} users, samples={len(samples):,}", flush=True)
             snos = g["goods_sno"].tolist()[-self.hparams.max_user_history:]
             evs = g["event"].tolist()[-self.hparams.max_user_history:]
+            tss = g["ts"].tolist()[-self.hparams.max_user_history:]
             if len(snos) < self.hparams.min_history_items + 1:
                 continue
 
-            # SID 매핑 가능한 sno 만 사용
             valid_sids = self.store.lookup(snos)
             if valid_sids is None:
                 continue
 
-            # augment: random end positions; else: 마지막 1개만
+            # v7: order position — 같은 ts 는 같은 order position (cart/outfit 동시구매 신호)
+            if self.hparams.use_order_pos:
+                order_pos_per_item = np.zeros(len(snos), dtype=np.int64)
+                last_ts = -1
+                cur_pos = -1
+                for i, t in enumerate(tss):
+                    if t != last_ts:
+                        cur_pos += 1
+                        last_ts = t
+                    order_pos_per_item[i] = cur_pos
+            else:
+                order_pos_per_item = None
+
             n_pos = len(snos)
             if augment:
                 k = min(self.hparams.augment_factor, n_pos - 1)
-                end_positions = rng.choice(np.arange(1, n_pos), size=k, replace=False).tolist()
+                # v7: popularity bias — end position 을 inv-freq 가중
+                if self.hparams.use_popularity_bias_augment and self._item_freq:
+                    candidate_idx = np.arange(1, n_pos)
+                    weights = np.array(
+                        [
+                            1.0 / np.sqrt(max(self._item_freq.get(int(snos[i]), 1), 1))
+                            for i in candidate_idx
+                        ],
+                        dtype=np.float64,
+                    )
+                    weights = weights / weights.sum()
+                    end_positions = rng.choice(
+                        candidate_idx, size=k, replace=False, p=weights
+                    ).tolist()
+                else:
+                    end_positions = rng.choice(
+                        np.arange(1, n_pos), size=k, replace=False
+                    ).tolist()
             else:
                 end_positions = [n_pos - 1]
 
@@ -184,12 +243,17 @@ class TIGERLiteDataModule(L.LightningDataModule):
 
                 enc_tokens = np.zeros(max_T_enc, dtype=np.int64)
                 enc_beh = np.zeros(max_T_enc, dtype=np.int64)
+                enc_order_pos = np.zeros(max_T_enc, dtype=np.int64)
                 flat = history_sids.flatten()
                 flat_beh = np.repeat(
                     [BEHAVIOR_TO_ID.get(e, 0) for e in history_evs], L
                 ).astype(np.int64)
                 enc_tokens[-n_hist * L:] = flat
                 enc_beh[-n_hist * L:] = flat_beh
+                if order_pos_per_item is not None:
+                    hist_order = order_pos_per_item[max(0, end - self.hparams.max_history_items):end]
+                    # 같은 SID 의 L 개 토큰 → 같은 order position 공유
+                    enc_order_pos[-n_hist * L:] = np.repeat(hist_order, L)
                 enc_pos = np.arange(max_T_enc, dtype=np.int64)
                 enc_mask = (enc_tokens > 0).astype(np.int64)
                 dec_input = np.concatenate([[BOS_ID], target_sid]).astype(np.int64)
@@ -200,6 +264,7 @@ class TIGERLiteDataModule(L.LightningDataModule):
                     "enc_tokens": enc_tokens,
                     "enc_beh": enc_beh,
                     "enc_pos": enc_pos,
+                    "enc_order_pos": enc_order_pos,
                     "enc_mask": enc_mask,
                     "dec_input": dec_input,
                     "dec_target": dec_target,

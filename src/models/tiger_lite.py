@@ -50,6 +50,8 @@ class TIGERLiteModel(L.LightningModule):
         weight_decay: float = 0.01,
         warmup_epochs: int = 3,
         eta_min: float = 1e-5,
+        # === v7 신규 ===
+        max_order_positions: int = 0,    # 0 → order pos 미사용 (기존 동작)
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -57,6 +59,7 @@ class TIGERLiteModel(L.LightningModule):
         self._beam: ConstrainedBeamSearch = None
         self._trie: SIDTrie = None
         self.loss_acc = _Acc()
+        self._val_topk_items = set()  # Coverage@K 측정용 (epoch 별 reset)
 
     def setup(self, stage: str):
         if self.net is not None:
@@ -72,7 +75,9 @@ class TIGERLiteModel(L.LightningModule):
             n_heads=self.hparams.n_heads,
             ff_dim=self.hparams.ff_dim,
             dropout=self.hparams.dropout,
+            max_order_positions=self.hparams.max_order_positions,
         )
+        self._num_total_items = len(dm.store.sno_to_sid) if hasattr(dm.store, "sno_to_sid") else 0
         # trie for inventory-aware decoding
         all_sids = dm.store.all_item_sids()
         self._trie = SIDTrie(all_sids)
@@ -86,6 +91,7 @@ class TIGERLiteModel(L.LightningModule):
         logits = self.net(
             batch["enc_tokens"], batch["enc_beh"], batch["enc_pos"], batch["enc_mask"],
             batch["dec_input"], batch["dec_pos"],
+            enc_order_pos=batch.get("enc_order_pos"),
         )  # (B, T_dec, V)
         target = batch["dec_target"]  # (B, T_dec)
         # behavior weighted CE (sample 별 가중)
@@ -108,30 +114,48 @@ class TIGERLiteModel(L.LightningModule):
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
+        import math
         # encoder pass
         enc_h = (
             self.net.tok_emb(batch["enc_tokens"])
             + self.net.behavior_emb(batch["enc_beh"])
             + self.net.enc_pos_emb(batch["enc_pos"].clamp(max=self.net.enc_pos_emb.num_embeddings - 1))
         )
+        if self.hparams.max_order_positions > 0 and "enc_order_pos" in batch:
+            enc_h = enc_h + self.net.order_pos_emb(
+                batch["enc_order_pos"].clamp(max=self.net.order_pos_emb.num_embeddings - 1)
+            )
         src_key_padding_mask = ~batch["enc_mask"].bool()
         memory = self.net.encoder(enc_h, src_key_padding_mask=src_key_padding_mask)
 
         beams = self._beam.search(memory, src_key_padding_mask)
-        # beam → target match Recall@K
         target = batch["dec_target"][:, :-1]  # exclude EOS, (B, L)
         target_list = [tuple(t.tolist()) for t in target]
 
+        # Recall@K, NDCG@K, Coverage@K (모든 k 한 번에)
         for k in self.hparams.eval_ks:
             hits = 0
+            ndcg_sum = 0.0
             total = 0
             for user_beams, tgt in zip(beams, target_list):
                 topk = [tuple(p) for p, _ in user_beams[:k]]
+                self._val_topk_items.update(topk)  # Coverage 측정용
                 if tgt in topk:
                     hits += 1
+                    rank = topk.index(tgt)  # 0-based
+                    ndcg_sum += 1.0 / math.log2(rank + 2)  # gain=1, log2(rank+2)
                 total += 1
             self.log(f"val/Recall@{k}", hits / max(total, 1),
                      prog_bar=(k == 10), on_step=False, on_epoch=True)
+            self.log(f"val/NDCG@{k}", ndcg_sum / max(total, 1),
+                     prog_bar=(k == 10), on_step=False, on_epoch=True)
+
+    def on_validation_epoch_end(self):
+        # Coverage@K = unique items 본 / 전체 item 수 (top-K 의 union)
+        if self._num_total_items > 0 and len(self._val_topk_items) > 0:
+            cov = len(self._val_topk_items) / self._num_total_items
+            self.log("val/Coverage", cov, prog_bar=False)
+        self._val_topk_items = set()
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(

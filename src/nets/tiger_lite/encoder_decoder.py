@@ -64,17 +64,22 @@ class TigerLiteNet(nn.Module):
         n_heads: int = 6,
         ff_dim: int = 1536,
         dropout: float = 0.1,
+        # === v7 신규 (백워드 호환: 0 → 미사용) ===
+        max_order_positions: int = 0,   # 같은 ts(=같은 cart) 그룹 position 임베딩
     ):
         super().__init__()
         self.codebook_sizes = tuple(codebook_sizes)
         self.num_levels = len(codebook_sizes)
         self.offsets, self.total_vocab = build_sid_vocab(self.codebook_sizes)
+        self.max_order_positions = max_order_positions
 
         # shared token embedding (encoder/decoder)
         self.tok_emb = nn.Embedding(self.total_vocab, dim, padding_idx=PAD_ID)
         self.behavior_emb = nn.Embedding(num_behaviors, dim, padding_idx=0)
         self.enc_pos_emb = nn.Embedding(max_seq_len, dim)
         self.dec_pos_emb = nn.Embedding(self.num_levels + 2, dim)  # BOS + L + EOS
+        if max_order_positions > 0:
+            self.order_pos_emb = nn.Embedding(max_order_positions, dim)
 
         enc_layer = nn.TransformerEncoderLayer(
             d_model=dim, nhead=n_heads, dim_feedforward=ff_dim,
@@ -117,6 +122,7 @@ class TigerLiteNet(nn.Module):
         enc_mask: torch.Tensor,           # (B, T_enc) bool (1 valid)
         dec_input_tokens: torch.Tensor,   # (B, T_dec)  e.g. [BOS, sid_0, sid_1, sid_2]
         dec_positions: torch.Tensor,      # (B, T_dec)
+        enc_order_pos: Optional[torch.Tensor] = None,  # v7: (B, T_enc) — 같은 ts → 같은 position
     ) -> torch.Tensor:
         """returns logits (B, T_dec, total_vocab)."""
         # encoder
@@ -125,6 +131,10 @@ class TigerLiteNet(nn.Module):
             + self.behavior_emb(enc_behavior_ids)
             + self.enc_pos_emb(enc_positions.clamp(max=self.enc_pos_emb.num_embeddings - 1))
         )
+        if self.max_order_positions > 0 and enc_order_pos is not None:
+            enc_h = enc_h + self.order_pos_emb(
+                enc_order_pos.clamp(max=self.max_order_positions - 1)
+            )
         src_key_padding_mask = ~enc_mask.bool()
         memory = self.encoder(enc_h, src_key_padding_mask=src_key_padding_mask)
 
