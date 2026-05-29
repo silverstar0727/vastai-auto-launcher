@@ -1,0 +1,87 @@
+# Multi-Interest — production aws_code 와 완전 동일 설정
+#
+# 차이점 (이전 multi_interest_v2.yaml 대비):
+#   - DataModule: MultiInterestProdDataModule (leave-last-out + 4-pass 필터)
+#   - 데이터: train+val+test 121일 결합 (production 도 단일 pool 에서 leave-last-out)
+#   - 필터: on_sale + filter_short_seq(count_unique=False) + pref/click + popular top-300k
+#         + filter_short_seq(count_unique=True) ← 진짜 engaged user
+#   - batch 8192 → 2048 (production 그대로)
+#   - lr 0.002 → 0.001 (production 그대로)
+#   - num_workers 8 → 4 (production num_worker=3 근사)
+#   - val cap: max_test_samples 200,000 (production 그대로)
+#
+# Production reference: docs/ably-reco/aws_code/src/apps/multi_interest/train/config.py
+
+name: multi_interest
+version: prod_matched
+
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  precision: 16-mixed
+  max_epochs: 10
+  deterministic: true
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  log_every_n_steps: 100
+
+model:
+  class_path: MultiInterestModel
+  init_args:
+    embedding_size: 128
+    use_item_bias: true
+    attention_size: 8
+    interest_count: 4
+    use_rank_learning: false
+    soft_selection: false
+    top_k: 10
+    optimizer_params:
+      optimizer: adam
+      lr: 0.001            # production default
+      weight_decay: 0.0
+      lr_scheduler: step
+      lr_scheduler_step: 4
+      lr_scheduler_gamma: 0.1
+
+data:
+  class_path: MultiInterestProdDataModule
+  init_args:
+    base_dir: /home/jeongmindo/projects/ably/data/reco_experiments/v2_full
+    # production 필터 (kubeflow override 반영)
+    max_items: 300_000
+    min_actions_per_user: 100
+    preference_per_click_threshold: 0.02
+    min_click_threshold: 30_000
+    # 시퀀스
+    max_len: 80
+    # 배치 (production 그대로)
+    batch_size: 2048
+    test_batch_size: 64
+    num_workers: 4
+    drop_last_batch: true
+    # 학습 샘플
+    num_train_sample_per_user: 60
+    preference_event_weight: 40.0
+    next_items_window_size: 5
+    final_item_sampling_weight: 3.0
+    final_item_score: 1.0
+    use_rank_learning: false
+    # test cap — production 그대로
+    max_test_samples: 200_000
+    # 시드
+    dataloader_random_seed: 0
+    seed: 42
+
+early_stopping:
+  monitor: val/NDCG_10
+  patience: 5
+  mode: max
+
+model_ckpt:
+  monitor: val/NDCG_10
+  mode: max
+  filename: "best_acc_model"
+  auto_insert_metric_name: false
+  save_weights_only: true
+  save_top_k: 1

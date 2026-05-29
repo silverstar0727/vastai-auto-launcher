@@ -3,6 +3,7 @@ from . import cbf
 from . import complement
 from . import multi_interest
 from . import multi_interest_v2
+from . import multi_interest_prod
 from . import lightgcn
 from . import sid_tokenizer
 from . import sid_tokenizer_letter
