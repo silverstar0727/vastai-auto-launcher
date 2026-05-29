@@ -167,7 +167,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
         hp = self.hparams
         base = Path(hp.base_dir)
         train_files = sorted((base / "interactions" / "train").glob("*.parquet"))[-hp.train_days:]
-        logger.info(f"[MI-v2] train files: {len(train_files)} (last {hp.train_days} days)")
+        print(f"[MI-v2] train files: {len(train_files)} (last {hp.train_days} days)")
 
         # === Pass 1: item popularity (file-by-file streaming) ===
         # 21GB train 데이터를 한 번에 올리면 OOM → 파일별 처리.
@@ -178,7 +178,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
             df = df.dropna(subset=["goods_sno"])
             item_counter.update(df["goods_sno"].astype("int64").to_numpy().tolist())
             if (i + 1) % 10 == 0 or i == len(train_files) - 1:
-                logger.info(
+                print(
                     f"[MI-v2] pass1 item-count {i+1}/{len(train_files)} — "
                     f"unique items so far: {len(item_counter):,}"
                 )
@@ -189,25 +189,25 @@ class MultiInterestV2DataModule(L.LightningDataModule):
         item_set = set(top_items)
         self._sno_to_idx = {int(s): i + 1 for i, s in enumerate(top_items)}
         self.num_items = len(top_items) + 1
-        logger.info(f"[MI-v2] item universe: {len(top_items):,} (PAD=0, idx=1..{self.num_items-1})")
+        print(f"[MI-v2] item universe: {len(top_items):,} (PAD=0, idx=1..{self.num_items-1})")
         del item_counter
 
         # category 매핑 (item_meta.parquet — 작음)
         self._build_category_mapping(base / "meta" / "item_meta.parquet")
 
         # === Pass 2: per-user accumulation (file-by-file) ===
-        # user_code → list[item_idx]. 비 eligible 까지 일단 받고 끝에서 필터.
-        user_items: Dict[int, list] = {}
-        user_events: Dict[int, list] = {}
+        # user_code → list[item_idx]. user_code 는 string ('m1385755'). 비 eligible 까지
+        # 일단 받고 끝에서 필터.
+        user_items: Dict[str, list] = {}
+        user_events: Dict[str, list] = {}
         for i, f in enumerate(train_files):
             df = pd.read_parquet(
                 f, columns=["user_code", "goods_sno", "event", "ts"]
-            ).dropna()
+            )
+            # user_code 는 'm1385755' 같은 string prefix 라 numeric 변환 금지 (TIGER-lite 와 동일).
             df["goods_sno"] = pd.to_numeric(df["goods_sno"], errors="coerce")
-            df["user_code"] = pd.to_numeric(df["user_code"], errors="coerce")
             df = df.dropna(subset=["goods_sno", "user_code"])
             df["goods_sno"] = df["goods_sno"].astype("int64")
-            df["user_code"] = df["user_code"].astype("int64")
             df = df[df["goods_sno"].isin(item_set)]
             if len(df) == 0:
                 del df
@@ -219,16 +219,16 @@ class MultiInterestV2DataModule(L.LightningDataModule):
             df = df.sort_values(["user_code", "ts"], kind="stable")
 
             for uc, g in df.groupby("user_code", sort=False):
-                uc_int = int(uc)
-                items_l = user_items.get(uc_int)
+                uc_key = str(uc)
+                items_l = user_items.get(uc_key)
                 if items_l is None:
-                    user_items[uc_int] = g["item_idx"].tolist()
-                    user_events[uc_int] = g["event_code"].tolist()
+                    user_items[uc_key] = g["item_idx"].tolist()
+                    user_events[uc_key] = g["event_code"].tolist()
                 else:
                     items_l.extend(g["item_idx"].tolist())
-                    user_events[uc_int].extend(g["event_code"].tolist())
+                    user_events[uc_key].extend(g["event_code"].tolist())
             if (i + 1) % 5 == 0 or i == len(train_files) - 1:
-                logger.info(
+                print(
                     f"[MI-v2] pass2 per-user accum {i+1}/{len(train_files)} — "
                     f"users so far: {len(user_items):,}"
                 )
@@ -237,7 +237,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
         # eligible 필터 + numpy 변환
         user_train_items: List[np.ndarray] = []
         user_train_events: List[np.ndarray] = []
-        eligible_user_codes: List[int] = []
+        eligible_user_codes: List[str] = []
         for uc in sorted(user_items.keys()):
             items = user_items[uc]
             if len(items) < hp.min_actions_per_user:
@@ -248,7 +248,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
         total_pre = len(user_items)
         del user_items, user_events
         user_to_idx = {uc: i for i, uc in enumerate(eligible_user_codes)}
-        logger.info(
+        print(
             f"[MI-v2] eligible users (≥{hp.min_actions_per_user} actions): "
             f"{len(eligible_user_codes):,} / {total_pre:,}"
         )
@@ -296,7 +296,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
         self._test_dataset = _NonEmptyEvalSubset(
             MultiInterestEvalDataset(test_handler, hp.max_len), test_positives
         )
-        logger.info(
+        print(
             f"[MI-v2] datasets ready — train __len__={len(self._train_dataset):,}, "
             f"val={len(self._val_dataset):,}, test={len(self._test_dataset):,}"
         )
@@ -346,7 +346,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
         self.item_feat_values = {
             FeatureField.ITEM_STANDARD_CATEGORY: item_to_cat,
         }
-        logger.info(
+        print(
             f"[MI-v2] standard categories: {self.num_standard_categories} (PAD=0)"
         )
 
@@ -366,16 +366,12 @@ class MultiInterestV2DataModule(L.LightningDataModule):
         같은 user 는 첫 발견된 item 만 유지 (이미 채워졌으면 skip).
         """
         files = sorted(dir_path.glob("*.parquet"))[-days:]
-        first_item: Dict[int, int] = {}  # user_code → item_idx
+        first_item: Dict[str, int] = {}  # user_code (string) → item_idx
         for i, f in enumerate(files):
-            df = pd.read_parquet(
-                f, columns=["user_code", "goods_sno", "ts"]
-            ).dropna()
+            df = pd.read_parquet(f, columns=["user_code", "goods_sno", "ts"])
             df["goods_sno"] = pd.to_numeric(df["goods_sno"], errors="coerce")
-            df["user_code"] = pd.to_numeric(df["user_code"], errors="coerce")
             df = df.dropna(subset=["goods_sno", "user_code"])
             df["goods_sno"] = df["goods_sno"].astype("int64")
-            df["user_code"] = df["user_code"].astype("int64")
             df = df[df["goods_sno"].isin(item_set)]
             if len(df) == 0:
                 del df
@@ -383,12 +379,12 @@ class MultiInterestV2DataModule(L.LightningDataModule):
             df["item_idx"] = df["goods_sno"].map(self._sno_to_idx).astype("int64")
             df = df.sort_values(["user_code", "ts"], kind="stable")
             for uc, g in df.groupby("user_code", sort=False):
-                uc_int = int(uc)
-                if uc_int in user_to_idx and uc_int not in first_item:
-                    first_item[uc_int] = int(g["item_idx"].iloc[0])
+                uc_key = str(uc)
+                if uc_key in user_to_idx and uc_key not in first_item:
+                    first_item[uc_key] = int(g["item_idx"].iloc[0])
             del df
             if (i + 1) % 3 == 0 or i == len(files) - 1:
-                logger.info(
+                print(
                     f"[MI-v2] {split_label} eval positives {i+1}/{len(files)} — "
                     f"covered users: {len(first_item):,}"
                 )
@@ -411,7 +407,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
                 for i, p in enumerate(positives)
             ]
             non_empty = max_users
-        logger.info(f"[MI-v2] {split_label} eligible users with positive: {non_empty:,}")
+        print(f"[MI-v2] {split_label} eligible users with positive: {non_empty:,}")
         return positives
 
     # ------------- DataLoaders -------------
