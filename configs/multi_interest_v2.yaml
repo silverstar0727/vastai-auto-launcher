@@ -35,7 +35,7 @@ model:
     top_k: 10
     optimizer_params:
       optimizer: adam
-      lr: 0.001
+      lr: 0.002        # batch 2048→8192 (4×) → √4 = 2× scaling (safe square-root rule)
       weight_decay: 0.0
       lr_scheduler: step
       lr_scheduler_step: 4
@@ -54,10 +54,11 @@ data:
     max_items: 300_000
     # 시퀀스
     max_len: 80
-    # 배치
-    batch_size: 2048
-    test_batch_size: 64
-    num_workers: 2
+    # 배치 — production 은 batch 2048 / workers 2 지만, 우리 머신은 GPU 48GB / CPU 32 코어로
+    # 훨씬 큰 여유. workers=2 가 98% maxed 되어 GPU 가 30% idle 이었음.
+    batch_size: 8192          # 2048 → 8192, GPU 메모리 8.8 → ~30GB 예상
+    test_batch_size: 256      # 64 → 256, val 1920 user 한 번에 여러 batch 처리
+    num_workers: 8            # 2 → 8, worker 병목 해소
     drop_last_batch: true
     # 학습 샘플 (production kubeflow 인자 그대로)
     num_train_sample_per_user: 60

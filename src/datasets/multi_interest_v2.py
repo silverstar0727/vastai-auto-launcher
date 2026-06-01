@@ -419,6 +419,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
             shuffle=True,
             pin_memory=True,
             num_workers=self.hparams.num_workers,
+            persistent_workers=self.hparams.num_workers > 0,
             drop_last=self.hparams.drop_last_batch,
         )
 
@@ -429,6 +430,7 @@ class MultiInterestV2DataModule(L.LightningDataModule):
             shuffle=False,
             pin_memory=True,
             num_workers=self.hparams.num_workers,
+            persistent_workers=self.hparams.num_workers > 0,
         )
 
     def test_dataloader(self):
