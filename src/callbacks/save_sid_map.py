@@ -48,11 +48,16 @@ class SaveSIDMapCallback(L.Callback):
                     "brand_id": torch.stack([f["brand_id"] for f in feats]).to(device),
                     "price_bucket": torch.stack([f["price_bucket"] for f in feats]).to(device),
                 }
+                if "attribute_ids" in feats[0]:
+                    batch["attribute_ids"] = torch.stack(
+                        [f["attribute_ids"] for f in feats]
+                    ).to(device)
                 x = encoder(
                     text_emb=batch["text_emb"],
                     category_id=batch["category_id"],
                     brand_id=batch["brand_id"],
                     price_bucket=batch["price_bucket"],
+                    attribute_ids=batch.get("attribute_ids"),
                 )
                 codes = vae.encode_to_sid(x).cpu().numpy()
                 codes_all.append(codes)
