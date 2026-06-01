@@ -143,10 +143,11 @@ class HSTUTwoTowerModel(L.LightningModule):
         # PoC: max 50K 후보 sampling 추천하지만 일단 full
         item_table = self.net.item_emb.weight       # (V, D)
         logits = u_max @ item_table.t()             # (B, V)
+        neg_inf = torch.finfo(logits.dtype).min
         # exclude pad item id 0
-        logits[:, 0] = -1e9
+        logits[:, 0] = neg_inf
         # 입력 시퀀스 안의 item 은 점수 깎기 (history 제외)
-        logits.scatter_(1, batch["item_ids"], -1e9)
+        logits.scatter_(1, batch["item_ids"], neg_inf)
         target = batch["target_item"]
         metrics = _recall_ndcg(logits, target, ks=tuple(self.hparams.eval_ks))
         for k, v in metrics.items():
