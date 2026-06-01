@@ -110,6 +110,11 @@ class TIGERLiteModel(L.LightningModule):
                  batch_size=target.size(0))
         self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"],
                  on_step=True, prog_bar=True)
+        # Lightning 의 accumulate_grad_batches 는 gradient 를 SUM 만 하고 average 안 함
+        # → loss 를 직접 N 으로 나눠야 effective batch=N×batch 와 동치.
+        accum = getattr(self.trainer, "accumulate_grad_batches", 1) or 1
+        if accum > 1:
+            return loss / accum
         return loss
 
     @torch.no_grad()
@@ -155,6 +160,47 @@ class TIGERLiteModel(L.LightningModule):
         if self._num_total_items > 0 and len(self._val_topk_items) > 0:
             cov = len(self._val_topk_items) / self._num_total_items
             self.log("val/Coverage", cov, prog_bar=False)
+        self._val_topk_items = set()
+
+    # test_step / on_test_epoch_end: validation 과 동일 로직 (leave-last-out test set).
+    # metric prefix 만 test/* 로 분리.
+    def test_step(self, batch, batch_idx):
+        import math
+        enc_h = (
+            self.net.tok_emb(batch["enc_tokens"])
+            + self.net.behavior_emb(batch["enc_beh"])
+            + self.net.enc_pos_emb(batch["enc_pos"].clamp(max=self.net.enc_pos_emb.num_embeddings - 1))
+        )
+        if self.hparams.max_order_positions > 0 and "enc_order_pos" in batch:
+            enc_h = enc_h + self.net.order_pos_emb(
+                batch["enc_order_pos"].clamp(max=self.net.order_pos_emb.num_embeddings - 1)
+            )
+        src_key_padding_mask = ~batch["enc_mask"].bool()
+        memory = self.net.encoder(enc_h, src_key_padding_mask=src_key_padding_mask)
+        beams = self._beam.search(memory, src_key_padding_mask)
+        target = batch["dec_target"][:, :-1]
+        target_list = [tuple(t.tolist()) for t in target]
+        for k in self.hparams.eval_ks:
+            hits = 0
+            ndcg_sum = 0.0
+            total = 0
+            for user_beams, tgt in zip(beams, target_list):
+                topk = [tuple(p) for p, _ in user_beams[:k]]
+                self._val_topk_items.update(topk)
+                if tgt in topk:
+                    hits += 1
+                    rank = topk.index(tgt)
+                    ndcg_sum += 1.0 / math.log2(rank + 2)
+                total += 1
+            self.log(f"test/Recall@{k}", hits / max(total, 1),
+                     prog_bar=(k == 10), on_step=False, on_epoch=True)
+            self.log(f"test/NDCG@{k}", ndcg_sum / max(total, 1),
+                     prog_bar=(k == 10), on_step=False, on_epoch=True)
+
+    def on_test_epoch_end(self):
+        if self._num_total_items > 0 and len(self._val_topk_items) > 0:
+            cov = len(self._val_topk_items) / self._num_total_items
+            self.log("test/Coverage", cov, prog_bar=False)
         self._val_topk_items = set()
 
     def configure_optimizers(self):
