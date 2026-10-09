@@ -239,6 +239,7 @@ class MultiInterestDataModule(L.LightningDataModule):
         preference_per_click_condition: Optional[Dict] = None,
         # 기타
         save_preprocessed_data: bool = True,
+        use_cache: bool = True,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -367,6 +368,7 @@ class MultiInterestDataModule(L.LightningDataModule):
             use_search_data=False,
             save_preprocessed_data=hp.save_preprocessed_data,
             save_goods_info=hp.use_item_train_weight,
+            use_cache=hp.use_cache,
         )
 
     def _load_raw_user2items(self):
@@ -447,7 +449,7 @@ class MultiInterestDataModule(L.LightningDataModule):
         preprocessed_root = model_path.joinpath("preprocessed")
         dataset_path = preprocessed_root.joinpath("dataset.pkl")
 
-        if dataset_path.is_file():
+        if hp.use_cache and dataset_path.is_file():
             logger.info("Already User splitting preprocessed. Skip preprocessing")
             dataset_handler = DatasetHandler.from_pickle(dataset_path)
         else:

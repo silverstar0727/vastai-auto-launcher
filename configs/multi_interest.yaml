@@ -70,6 +70,7 @@ data:
     dataloader_random_seed: 0.0
     # 기타
     save_preprocessed_data: false
+    use_cache: true  # false 면 preprocessed/ 캐시가 있어도 무시하고 재계산
 
 early_stopping:
   monitor: val/NDCG_10

@@ -27,7 +27,6 @@ import datasets
 import nets
 import optimizers
 import models
-import transforms
 
 
 def cli_main(args: ArgsType = None, run: bool = True):

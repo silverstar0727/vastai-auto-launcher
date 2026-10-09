@@ -35,8 +35,9 @@ def _get_raw_user2items_and_on_voca_items(
     user2items_path: Path,
     on_voca_items_path: Path,
     save_preprocessed_data: bool,
+    use_cache: bool = True,
 ) -> Tuple[pd.DataFrame, List]:
-    if user2items_path.is_file():
+    if use_cache and user2items_path.is_file():
         logger.info("Already user2items df preprocessed. Skip preprocessing")
         df_user2items = pd.read_pickle(user2items_path)
         on_voca_items = pickle.load(on_voca_items_path.open("rb"))
@@ -225,6 +226,7 @@ def preprocess(
     use_search_data: bool,
     save_preprocessed_data: bool,
     save_goods_info: bool = False,
+    use_cache: bool = True,
 ):
     """CBF 전처리 파이프라인.
 
@@ -237,6 +239,7 @@ def preprocess(
         user2items_path,
         on_voca_items_path,
         save_preprocessed_data,
+        use_cache,
     )
     raw_df_items: pd.DataFrame = load_raw_df_items(on_voca_items)
 

@@ -1,1 +1,0 @@
-python3 -u src/main.py fit -c configs/config.yaml $@
